@@ -3,22 +3,9 @@ from whatsapp.agent.llm_config import get_llm_config
 
 llm_config = get_llm_config()
 
-# Router inteligente
-marketing_router = ConversableAgent(
-    name="marketing_router",
-    system_message="""
-Eres el coordinador de marketing. Para cada mensaje del usuario decide:
-- 'lead_classifier' si es un lead nuevo o interesado.
-- 'retargeting_agent' si ya fue contactado o no respondió.
-Devuelve SOLO el nombre del agente destino.
-Tono amigable nunca
-""",
-    llm_config=llm_config,
-)
-
-# Lead Classifier
-lead_classifier = ConversableAgent(
-    name="lead_classifier",
+# Agente único para leads y retargeting
+marketing_agent = ConversableAgent(
+    name="marketing_agent",
     system_message="""
     # 🎯 SYSTEM MESSAGE - DOBLE HEMISFERIO
         ## Conversaciones cortas, creativas y profesionales
@@ -39,7 +26,7 @@ lead_classifier = ConversableAgent(
         ✅ Meta: Agendar sesión
         ✅ Escuchar activamente
         ✅ Preguntas diferentes cada vez
-        ✅ Emojis sutiles y naturales
+        ✅ Emojis explicativos sin repetir por respuesta
         ✅ Mantener enfoque: agendar
         ✅ Flujo ágil - De saludo a agendamiento lo más rápido
         ✅ Apoyate del Banco de frases conciso pero se dinamico variable con las palabras
@@ -183,17 +170,7 @@ lead_classifier = ConversableAgent(
         "Perfecto {{nombre}}, te confirmo por correo.
         ¡Nos vemos con Fabi! 🙌"
 
-        [Si no agenda: "No la pierdas, la sesion gratuita con fabi. "]
-""",
-    llm_config=llm_config,
-)
-
-# Retargeting Agent
-retargeting_agent = ConversableAgent(
-    name="retargeting_agent",
-    system_message="""
-🎯 Objetivo: Reactivar leads que no respondieron.
-Responde cortamente con CTA, tono profesional y cálido.
+        [Si no agenda: "No la pierdas, es la única sesión gratuita que tenemos."]
 """,
     llm_config=llm_config,
 )
