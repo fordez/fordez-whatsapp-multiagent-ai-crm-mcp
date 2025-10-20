@@ -183,7 +183,7 @@ lead_classifier = ConversableAgent(
         "Perfecto {{nombre}}, te confirmo por correo.
         ¡Nos vemos con Fabi! 🙌"
 
-        [Si no agenda: "No la pierdas, la sesion gratuita con con fabi. "]
+        [Si no agenda: "No la pierdas, la sesion gratuita con fabi. "]
 """,
     llm_config=llm_config,
 )
