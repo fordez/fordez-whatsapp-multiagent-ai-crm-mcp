@@ -1,31 +1,41 @@
-from whatsapp.webhook.request.handlers.text import handle_text
-from whatsapp.webhook.request.handlers.image import handle_image
-from whatsapp.webhook.request.handlers.audio import handle_audio
-from whatsapp.webhook.request.handlers.video import handle_video
-from whatsapp.webhook.request.handlers.document import handle_document
-from whatsapp.webhook.request.handlers.location import handle_location
-from whatsapp.webhook.request.handlers.contact import handle_contact
-from whatsapp.webhook.request.handlers.reaction import handle_reaction
+"""
+Dispatcher único para WhatsApp.
+Solo decide qué handler usar y devuelve un mensaje unificado.
+"""
+
+from whatsapp.webhook.request.handlers import (
+    handle_audio,
+    handle_contact,
+    handle_document,
+    handle_image,
+    handle_location,
+    handle_reaction,
+    handle_text,
+    handle_unknown,
+    handle_video,
+)
 
 
 def dispatch_message(raw_data):
     """
-    Recibe todo el raw_data del webhook y llama al handler correspondiente
-    según el tipo de mensaje detectado dentro del handler.
+    Toma todo el raw_data del webhook.
+    Extrae el primer mensaje y llama al handler según msg['type'].
     """
 
-    # Tomamos solo el primer mensaje para simplificar
+    # ✅ Extraer el mensaje principal de forma segura
     try:
-        msg = raw_data["entry"][0]["changes"][0]["value"]["messages"][0]
-    except (KeyError, IndexError):
-        print("⚠️ No se encontró ningún mensaje en el webhook")
-        return {"status": "no_message"}
+        entry = raw_data["entry"][0]["changes"][0]["value"]
+        messages = entry.get("messages", [])
+        if not messages:
+            return {"status": "no_message", "raw": raw_data}
+
+        msg = messages[0]
+    except Exception:
+        return {"status": "invalid_payload", "raw": raw_data}
 
     msg_type = msg.get("type")
-    if not msg_type:
-        print("⚠️ Mensaje sin tipo definido")
-        return {"status": "unknown_type"}
 
+    # ✅ Tabla centralizada de handlers
     handlers = {
         "text": handle_text,
         "image": handle_image,
@@ -37,10 +47,8 @@ def dispatch_message(raw_data):
         "reaction": handle_reaction,
     }
 
-    handler = handlers.get(msg_type)
-    if handler:
-        # Pasamos todo raw_data al handler, que se encargará de extraer todo
-        return handler(raw_data)
-    else:
-        print(f"⚠️ Tipo de mensaje no soportado: {msg_type}")
-        return {"status": "unsupported", "type": msg_type}
+    # ✅ Seleccionar handler o fallback
+    handler = handlers.get(msg_type, handle_unknown)
+
+    # ✅ Ejecutar handler con mensaje + raw original
+    return handler(msg, raw_data)

@@ -1,23 +1,14 @@
-from whatsapp.agent.chat import MarketingChat
+import asyncio
 
-print("🤖 Chat de Marketing (modo WhatsApp modular)")
-print("💬 Escribe tu mensaje (o 'salir' para terminar).")
+from whatsapp.agent.agents import agent_service
 
-chat = MarketingChat()
 
-while True:
-    try:
-        user_input = input("\nYou: ")
-        if user_input.lower() in ["salir", "exit", "quit"]:
-            print("👋 Terminando sesión.")
-            break
+async def main():
+    question = "What is 2 + 2?"
+    result = await agent_service(question)
+    # si result es un objeto complejo, accede a la propiedad final_output como en tu ejemplo
+    print(getattr(result, "final_output", result))
 
-        target_agent_name = chat.route_message(user_input)
-        print(f"\n🔀 Enrutado a: {target_agent_name}")
 
-        agent_reply = chat.agent_reply(user_input, target_agent_name)
-        print(f"\n🧠 {target_agent_name}: {agent_reply}")
-
-    except KeyboardInterrupt:
-        print("\n👋 Sesión interrumpida.")
-        break
+if __name__ == "__main__":
+    asyncio.run(main())

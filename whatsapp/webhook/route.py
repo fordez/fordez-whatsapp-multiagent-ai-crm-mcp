@@ -1,24 +1,17 @@
-from fastapi import APIRouter, Request, Header, HTTPException, Response
-from whatsapp.agent.agents import marketing_agent
-from whatsapp.webhook.security import verify_signature
+# whatsapp/webhook/route.py
+from fastapi import APIRouter, HTTPException, Request, Response
+
+from whatsapp.agent.agents import agent_service
+from whatsapp.config import PHONE_NUMBER_ID, VERIFY_TOKEN, WHATSAPP_TOKEN, logger
 from whatsapp.webhook.request.dispatcher import dispatch_message
 from whatsapp.webhook.response.reply import send_text
-from config import VERIFY_TOKEN, logger
+from whatsapp.webhook.utilis.client_credentials import get_client_credentials
 
 router = APIRouter()
-
-# Diccionario para mantener la memoria por usuario
-user_histories = {}
-
-chat = marketing_agent  # agente único
 
 
 @router.get("/webhook")
 async def verify(request: Request):
-    """
-    Endpoint de verificación de WhatsApp.
-    Devuelve el 'hub.challenge' en texto plano si el token coincide.
-    """
     mode = request.query_params.get("hub.mode")
     token = request.query_params.get("hub.verify_token")
     challenge = request.query_params.get("hub.challenge")
@@ -32,23 +25,7 @@ async def verify(request: Request):
 
 
 @router.post("/webhook")
-async def receive_data(request: Request, x_hub_signature_256: str = Header(None)):
-    """
-    Recibe mensajes de WhatsApp, valida firma, los procesa con el agente y responde.
-    Mantiene memoria completa por usuario.
-    """
-    body = await request.body()
-
-    if not x_hub_signature_256:
-        raise HTTPException(status_code=400, detail="Missing signature header")
-
-    # Validar firma
-    try:
-        verify_signature(body, x_hub_signature_256)
-    except Exception as e:
-        logger.error(f"❌ Invalid signature: {e}")
-        raise HTTPException(status_code=403, detail="Invalid signature")
-
+async def receive_data(request: Request):
     # Parsear JSON
     try:
         raw_data = await request.json()
@@ -56,41 +33,66 @@ async def receive_data(request: Request, x_hub_signature_256: str = Header(None)
         logger.error(f"❌ Error parsing JSON: {e}")
         raise HTTPException(status_code=400, detail="Invalid JSON")
 
-    # Transformar data
+    # LOG de STATUS (sent, delivered, read)
+    try:
+        statuses = raw_data["entry"][0]["changes"][0]["value"].get("statuses", [])
+        for st in statuses:
+            logger.info(
+                f"📊 STATUS: {st.get('status')} | recipient={st.get('recipient_id')} | timestamp={st.get('timestamp')}"
+            )
+    except Exception:
+        pass
+
+    # Detectar cliente por phone_number_id usando Sheets/cache
+    phone_id = raw_data["entry"][0]["changes"][0]["value"]["metadata"].get(
+        "phone_number_id"
+    )
+    client = get_client_credentials(phone_id) if phone_id else None
+
+    if client:
+        whatsapp_token = client.get("Access Token") or WHATSAPP_TOKEN
+        phone_number_id = client.get("Phone Number ID") or PHONE_NUMBER_ID
+        role_qualifier_id = client.get("Role Qualifier ID")
+        logger.info(
+            f"🟦 Cliente detectado: {client.get('Business Name')} | phone_id={phone_id}"
+        )
+    else:
+        whatsapp_token = WHATSAPP_TOKEN
+        phone_number_id = PHONE_NUMBER_ID
+        role_qualifier_id = None
+        logger.warning("⚠️ No se encontraron credenciales, usando fallback .env")
+
+    # Transformar datos
     transformed_data = dispatch_message(raw_data)
+
+    # Extraer datos
     message = transformed_data.get("message") or transformed_data.get("text")
     from_number = transformed_data.get("from")
     reply_to_id = transformed_data.get("wamid")
 
     if not message:
-        logger.info("⚠️ No se encontró texto en el mensaje")
         return {"status": "no_message"}
 
     logger.info(f"📝 Parsed text message from {from_number}: {message}")
 
-    # Inicializar historial del usuario si no existe
-    if from_number not in user_histories:
-        user_histories[from_number] = []
-
-    # Guardar mensaje del usuario
-    user_histories[from_number].append({"role": "user", "content": message})
-
-    # Generar respuesta usando todo el historial del usuario
+    # Llamar al agente
     try:
-        reply = chat.generate_reply(
-            messages=[{"role": "system", "content": chat.system_message}]
-            + user_histories[from_number]
-        )
+        result = await agent_service(message, role_qualifier_id=role_qualifier_id)
+        reply = result.get("final_output", "Lo siento, no pude generar una respuesta.")
         logger.info(f"💬 Agent reply: {reply}")
-        # Guardar respuesta del agente
-        user_histories[from_number].append({"role": "assistant", "content": reply})
     except Exception as e:
         logger.error(f"❌ Error generando respuesta del agente: {e}")
         reply = "Lo siento, hubo un error procesando tu mensaje."
 
-    # Enviar la respuesta a WhatsApp
+    # Enviar respuesta usando credenciales dinámicas
     try:
-        await send_text(to=from_number, body=reply, reply_to=reply_to_id)
+        await send_text(
+            to=from_number,
+            body=reply,
+            reply_to=reply_to_id,
+            token=whatsapp_token,
+            phone_number_id=phone_number_id,
+        )
         logger.info(f"✅ Mensaje enviado a {from_number}")
     except Exception as e:
         logger.error(f"❌ Error enviando mensaje: {e}")

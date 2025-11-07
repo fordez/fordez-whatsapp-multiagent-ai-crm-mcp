@@ -1,7 +1,9 @@
-import hmac
 import hashlib
+import hmac
+
 from fastapi import HTTPException
-from config import APP_SECRET, logger
+
+from whatsapp.config import APP_SECRET, logger
 
 
 def verify_signature(body: bytes, signature: str):
