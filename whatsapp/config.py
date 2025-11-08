@@ -1,6 +1,7 @@
 import logging
 import os
 
+import pytz
 from dotenv import load_dotenv
 
 # Cargar .env
@@ -41,7 +42,13 @@ WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
 # ====================================================
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
 SHEET_NAME = os.getenv("SHEET_NAME")
+SHEET_NAME_LEAD = os.getenv("SHEET_NAME_LEAD")
 SERVICE_ACCOUNT_FILE = os.getenv("SERVICE_ACCOUNT_FILE")
+
+# ====================================================
+# 🌎 Zona horaria
+# ====================================================
+TIMEZONE = pytz.timezone(os.getenv("TIMEZONE", "America/Argentina/Buenos_Aires"))
 
 
 # ====================================================
