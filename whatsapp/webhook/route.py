@@ -1,9 +1,12 @@
 # whatsapp/webhook/route.py
 import asyncio
 
+import httpx
+import openai
 from fastapi import APIRouter, HTTPException, Request, Response
 
 from whatsapp.agent.agents import agent_service
+from whatsapp.agent.load_instruction import load_instructions_for_user
 from whatsapp.config import PHONE_NUMBER_ID, VERIFY_TOKEN, WHATSAPP_TOKEN, logger
 from whatsapp.webhook.request.dispatcher import dispatch_message
 from whatsapp.webhook.response.reply import send_text
@@ -12,9 +15,10 @@ from whatsapp.webhook.utilis.user_verify import get_or_create_user
 
 router = APIRouter()
 
-# ===============================
+
+# ==========================================================
 # Helpers
-# ===============================
+# ==========================================================
 
 
 async def parse_request_json(request: Request):
@@ -47,29 +51,20 @@ async def get_business(phone_id: str):
     return client
 
 
-async def load_instructions(role_qualifier_id: str):
-    if not role_qualifier_id:
-        return "Hola, soy tu asistente."
+# ==========================================================
+# Agent runner
+# ==========================================================
+
+
+async def run_agent(message: str, system_doc: str, user_data: dict = None):
     try:
-        from whatsapp.agent.load_instruction import load_instructions_from_doc
-
-        return load_instructions_from_doc(role_qualifier_id)
-    except Exception as e:
-        logger.error(f"Error cargando instrucciones: {e}")
-        return "Hola, soy tu asistente."
-
-
-async def run_agent(message: str, role_qualifier_id: str, user_data: dict = None):
-    try:
-        prompt = f"Usuario: {user_data}\nMensaje: {message}" if user_data else message
-        result = await agent_service(prompt, role_qualifier_id=role_qualifier_id)
+        prompt = f"### SYSTEM\n{system_doc}\n\n### USER\nUsuario: {user_data}\nMensaje: {message}"
+        result = await agent_service(prompt)
 
         if hasattr(result, "final_output"):
             return str(result.final_output)
-
         if isinstance(result, dict):
             return str(result.get("final_output", result))
-
         return str(result)
 
     except Exception as e:
@@ -93,10 +88,6 @@ async def send_whatsapp_message(
 
 
 def extract_whatsapp_user_info(raw_data: dict) -> dict:
-    """
-    Extrae información del usuario desde el payload de WhatsApp
-    Retorna: {"usuario": "Fordez"} - el nombre del perfil
-    """
     try:
         contacts = raw_data["entry"][0]["changes"][0]["value"].get("contacts", [])
         if contacts:
@@ -104,13 +95,37 @@ def extract_whatsapp_user_info(raw_data: dict) -> dict:
             return {"usuario": contact.get("profile", {}).get("name", "")}
     except Exception as e:
         logger.error(f"Error extrayendo info de usuario: {e}")
-
     return {"usuario": ""}
 
 
-# ===============================
-# Webhook verify
-# ===============================
+# ==========================================================
+# Audio helpers
+# ==========================================================
+
+
+def get_media_url(media_id: str, token: str):
+    url = f"https://graph.facebook.com/v20.0/{media_id}"
+    resp = httpx.get(url, headers={"Authorization": f"Bearer {token}"})
+    resp.raise_for_status()
+    return resp.json()["url"]
+
+
+def download_media(media_url: str, token: str):
+    resp = httpx.get(media_url, headers={"Authorization": f"Bearer {token}"})
+    resp.raise_for_status()
+    return resp.content
+
+
+def transcribe_audio(audio_bytes: bytes):
+    resp = openai.audio.transcriptions.create(
+        model="gpt-4o-transcribe", file=("audio.ogg", audio_bytes)
+    )
+    return resp.text
+
+
+# ==========================================================
+# WEBHOOK VERIFY
+# ==========================================================
 
 
 @router.get("/webhook")
@@ -125,9 +140,9 @@ async def verify(request: Request):
     return Response(content="verify token mismatch", status_code=403)
 
 
-# ===============================
-# Webhook WhatsApp
-# ===============================
+# ==========================================================
+# WEBHOOK WHATSAPP
+# ==========================================================
 
 
 @router.post("/webhook")
@@ -147,31 +162,47 @@ async def receive_data(request: Request):
 
     whatsapp_token = client.get("Access Token") if client else WHATSAPP_TOKEN
     phone_number_id = client.get("Phone Number ID") if client else PHONE_NUMBER_ID
-    role_qualifier_id = client.get("Role Qualifier ID") if client else None
     sheet_crm_id = client.get("Sheet CRM ID") if client else None
 
-    # Extraer info del usuario desde el payload
     user_info = extract_whatsapp_user_info(raw_data)
 
     transformed = dispatch_message(raw_data)
+
     message = transformed.get("message") or transformed.get("text")
     from_number = transformed.get("from")
     reply_to_id = transformed.get("wamid")
     canal = transformed.get("canal", "whatsapp")
 
+    media_id = transformed.get("media_id")
+    msg_type = transformed.get("type")
+
+    if msg_type == "audio" and media_id:
+        try:
+            media_url = get_media_url(media_id, whatsapp_token)
+            audio_bytes = download_media(media_url, whatsapp_token)
+            transcript = transcribe_audio(audio_bytes)
+            message = transcript
+        except Exception as e:
+            logger.error(f"Error procesando audio: {e}")
+            message = "No pude procesar tu audio."
+
     if not message:
         return {"status": "no_message"}
 
-    # Preparar defaults con la info extraída del payload
     user_defaults = {"Usuario": user_info.get("usuario", from_number), "Canal": canal}
 
-    user_task = get_or_create_user(from_number, sheet_crm_id, defaults=user_defaults)
-    instructions_task = load_instructions(role_qualifier_id)
-    user_data, instructions = await asyncio.gather(user_task, instructions_task)
-
-    reply = await run_agent(
-        message, role_qualifier_id=role_qualifier_id, user_data=user_data
+    user_data = await get_or_create_user(
+        from_number, sheet_crm_id, defaults=user_defaults
     )
+
+    # ✅ Sacar estado del CRM
+    estado = (user_data.get("Estado") or "").strip()
+
+    # ✅ Cargar instrucciones correctas según el estado/rol
+    instructions = await load_instructions_for_user(estado, client)
+
+    # ✅ Ejecutar agente con SYSTEM del doc correcto
+    reply = await run_agent(message, system_doc=instructions, user_data=user_data)
 
     await send_whatsapp_message(
         from_number, reply, reply_to_id, whatsapp_token, phone_number_id
