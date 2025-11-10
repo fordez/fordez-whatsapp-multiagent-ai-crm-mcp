@@ -1,51 +1,13 @@
-# whatsapp/agent/load_instruction.py
-
 import json
 
 from googleapiclient.discovery import build
 from oauth2client.service_account import ServiceAccountCredentials
 
-from whatsapp.config import SERVICE_ACCOUNT_FILE, logger
-
-# ==========================================================
-# ✅ CARGAR INSTRUCCIONES DESDE GOOGLE DOCS (SIN CACHE)
-# ==========================================================
-
-
-def load_instructions_from_doc(doc_id: str):
-    """
-    Carga las instrucciones desde un Google Docs usando Service Account
-    directamente, sin usar cache.
-    """
-    try:
-        scopes = ["https://www.googleapis.com/auth/documents.readonly"]
-        creds = ServiceAccountCredentials.from_json_keyfile_name(
-            SERVICE_ACCOUNT_FILE, scopes
-        )
-        service = build("docs", "v1", credentials=creds)
-        doc = service.documents().get(documentId=doc_id).execute()
-
-        content = []
-        for element in doc.get("body", {}).get("content", []):
-            text_run = element.get("paragraph", {}).get("elements", [])
-            for run in text_run:
-                txt = run.get("textRun", {}).get("content")
-                if txt:
-                    content.append(txt)
-
-        instructions = "".join(content).strip()
-        logger.info(f"✅ Instructions loaded from Google Docs: {doc_id}")
-        return instructions
-
-    except Exception as e:
-        logger.error(f"❌ Error loading instructions from doc {doc_id}: {e}")
-        return "No se pudieron cargar las instrucciones desde Google Docs"
-
+from whatsapp.config import config  # Usar la instancia config
 
 # ==========================================================
 # ✅ MAPEO ENTRE ESTADO DEL LEAD Y ROLE
 # ==========================================================
-
 STATE_ROLE_MAP = {
     "Nuevo": "Role Qualifier ID",
     "Seguimiento": "Role Qualifier ID",
@@ -58,69 +20,99 @@ STATE_ROLE_MAP = {
     "Recurrente": "Role Tracking ID",
 }
 
+# ==========================================================
+# ✅ CACHE GLOBAL DE INSTRUCCIONES
+# ==========================================================
+DOC_CACHE = {}  # {doc_id: {"data": str, "timestamp": str}}
+
 
 # ==========================================================
-# ✅ OBTENER ROLE NAME A PARTIR DEL ESTADO
+# ✅ FUNCIONES AUXILIARES
 # ==========================================================
-
-
 def resolve_role_name(user_state: str):
-    role = STATE_ROLE_MAP.get(user_state)
-    if not role:
-        logger.warning(f"No se encontró role para estado: {user_state}")
-        return None
-
-    logger.info(f"✅ Estado '{user_state}' usa role '{role}'")
-    return role
-
-
-# ==========================================================
-# ✅ OBTENER DOC_ID A PARTIR DEL ROLE NAME Y EL CLIENT
-# ==========================================================
+    return STATE_ROLE_MAP.get(user_state)
 
 
 def resolve_doc_id(role_name: str, client: dict):
-    """
-    role_name: Nue -> 'Role Qualifier ID'
-    client: dict que contiene { "Role Qualifier ID": "...docID..." }
-    """
-    if not client:
-        logger.warning("resolve_doc_id: client vacío")
+    if not client or not role_name:
         return None
-
-    doc_id = client.get(role_name)
-
-    if not doc_id:
-        logger.error(f"❌ No existe doc_id para role '{role_name}' en client")
-        return None
-
-    logger.info(f"✅ Resuelto doc_id '{doc_id}' para role '{role_name}'")
-    return doc_id
+    return client.get(role_name)
 
 
 # ==========================================================
-# ✅ FUNCIÓN PRINCIPAL PARA CARGAR INSTRUCCIONES
+# ✅ CARGAR INSTRUCCIONES DESDE GOOGLE DOCS
 # ==========================================================
+def load_instructions_from_doc(doc_id: str, get_timestamp: bool = False):
+    try:
+        scopes = [
+            "https://www.googleapis.com/auth/documents.readonly",
+            "https://www.googleapis.com/auth/drive.metadata.readonly",
+        ]
+        creds = ServiceAccountCredentials.from_json_keyfile_name(
+            config.service_account_file, scopes
+        )
+
+        # Servicio para Google Docs
+        docs_service = build("docs", "v1", credentials=creds)
+        doc = docs_service.documents().get(documentId=doc_id).execute()
+
+        if get_timestamp:
+            # Servicio para Google Drive (obtener metadata)
+            drive_service = build("drive", "v3", credentials=creds)
+            file_metadata = (
+                drive_service.files()
+                .get(fileId=doc_id, fields="modifiedTime")
+                .execute()
+            )
+            return file_metadata.get("modifiedTime")  # retorna string ISO
+
+        # Construir contenido completo
+        content = []
+        for element in doc.get("body", {}).get("content", []):
+            text_run = element.get("paragraph", {}).get("elements", [])
+            for run in text_run:
+                txt = run.get("textRun", {}).get("content")
+                if txt:
+                    content.append(txt)
+
+        instructions = "".join(content).strip()
+        return instructions
+
+    except Exception:
+        return "No se pudieron cargar las instrucciones desde Google Docs"
 
 
+# ==========================================================
+# ✅ CARGAR INSTRUCCIONES PARA UN USUARIO CON CACHE
+# ==========================================================
 async def load_instructions_for_user(user_state: str, client: dict):
-    """
-    user_state: Ej. 'Nuevo', 'Seguimiento', 'Interesado', etc.
-    client: diccionario con Role Qualifier ID, Role Meeting ID, Role Tracking ID
-    """
     try:
         role_name = resolve_role_name(user_state)
-
         if not role_name:
             return "Hola, soy tu asistente."
 
         doc_id = resolve_doc_id(role_name, client)
-
         if not doc_id:
             return "Hola, soy tu asistente."
 
-        return load_instructions_from_doc(doc_id)
+        # 1️⃣ Obtener timestamp actual del doc
+        current_timestamp = load_instructions_from_doc(doc_id, get_timestamp=True)
+        cached = DOC_CACHE.get(doc_id)
 
-    except Exception as e:
-        logger.error(f"Error en load_instructions_for_user: {e}")
+        if cached and cached["timestamp"] == current_timestamp:
+            # 🟢 Usar caché
+            return cached["data"]
+        else:
+            # 🔵 Refrescar desde Google Docs
+            instructions = load_instructions_from_doc(doc_id, get_timestamp=False)
+            if instructions and instructions.strip():
+                DOC_CACHE[doc_id] = {
+                    "data": instructions,
+                    "timestamp": current_timestamp,
+                }
+                return instructions
+            else:
+                return "Hola, soy tu asistente."
+
+    except Exception:
         return "Hola, soy tu asistente."

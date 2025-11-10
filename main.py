@@ -1,6 +1,10 @@
+import warnings
+
 from fastapi import FastAPI
 
 from whatsapp.webhook.route import router as webhook_router
+
+warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 app = FastAPI()
 app.include_router(webhook_router)

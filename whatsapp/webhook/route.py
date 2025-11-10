@@ -1,5 +1,5 @@
-# whatsapp/webhook/route.py
 import asyncio
+import logging
 
 import httpx
 import openai
@@ -7,11 +7,18 @@ from fastapi import APIRouter, HTTPException, Request, Response
 
 from whatsapp.agent.agents import agent_service
 from whatsapp.agent.load_instruction import load_instructions_for_user
-from whatsapp.config import PHONE_NUMBER_ID, VERIFY_TOKEN, WHATSAPP_TOKEN, logger
+from whatsapp.config import config
 from whatsapp.webhook.request.dispatcher import dispatch_message
 from whatsapp.webhook.response.reply import send_text
 from whatsapp.webhook.utilis.client_credentials import get_client_credentials
 from whatsapp.webhook.utilis.user_verify import get_or_create_user
+
+logger = logging.getLogger("whatsapp")
+if not logger.handlers:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+    )
 
 router = APIRouter()
 
@@ -19,63 +26,29 @@ router = APIRouter()
 # ==========================================================
 # Helpers
 # ==========================================================
-
-
 async def parse_request_json(request: Request):
     try:
         return await request.json()
-    except Exception as e:
-        logger.error(f"Error parsing JSON: {e}")
+    except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON")
 
 
-def log_statuses(raw_data: dict):
-    try:
-        statuses = raw_data["entry"][0]["changes"][0]["value"].get("statuses", [])
-        for st in statuses:
-            logger.info(
-                f"STATUS: {st.get('status')} | recipient={st.get('recipient_id')} | timestamp={st.get('timestamp')}"
-            )
-    except Exception:
-        pass
+def safe_get(d: dict, key: str, default=None):
+    return d.get(key) if d and key in d else default
 
 
 async def get_business(phone_id: str):
     client = get_client_credentials(phone_id) if phone_id else None
-    if client:
-        logger.info(
-            f"Cliente detectado: {client.get('Business Name')} | phone_id={phone_id}"
-        )
-    else:
-        logger.warning("No se encontraron credenciales, usando .env")
     return client
-
-
-# ==========================================================
-# Agent runner
-# ==========================================================
-
-
-async def run_agent(message: str, system_doc: str, user_data: dict = None):
-    try:
-        prompt = f"### SYSTEM\n{system_doc}\n\n### USER\nUsuario: {user_data}\nMensaje: {message}"
-        result = await agent_service(prompt)
-
-        if hasattr(result, "final_output"):
-            return str(result.final_output)
-        if isinstance(result, dict):
-            return str(result.get("final_output", result))
-        return str(result)
-
-    except Exception as e:
-        logger.error(f"Error generando respuesta del agente: {e}")
-        return "Lo siento, hubo un error."
 
 
 async def send_whatsapp_message(
     to: str, body: str, reply_to_id: str, token: str, phone_number_id: str
 ):
     try:
+        if not (to and body and token and phone_number_id):
+            logger.info(f"Mensaje a {to}: Entrega fallida (datos incompletos)")
+            return
         await send_text(
             to=to,
             body=body,
@@ -83,31 +56,29 @@ async def send_whatsapp_message(
             token=token,
             phone_number_id=phone_number_id,
         )
+        logger.info(f"Mensaje a {to}: Entrega exitosa")
     except Exception as e:
-        logger.error(f"Error enviando mensaje: {e}")
+        logger.info(f"Mensaje a {to}: Entrega fallida (Error: {str(e)})")
 
 
 def extract_whatsapp_user_info(raw_data: dict) -> dict:
-    try:
-        contacts = raw_data["entry"][0]["changes"][0]["value"].get("contacts", [])
-        if contacts:
-            contact = contacts[0]
-            return {"usuario": contact.get("profile", {}).get("name", "")}
-    except Exception as e:
-        logger.error(f"Error extrayendo info de usuario: {e}")
+    contacts = (
+        raw_data.get("entry", [{}])[0]
+        .get("changes", [{}])[0]
+        .get("value", {})
+        .get("contacts", [])
+    )
+    if contacts:
+        contact = contacts[0]
+        return {"usuario": contact.get("profile", {}).get("name", "")}
     return {"usuario": ""}
-
-
-# ==========================================================
-# Audio helpers
-# ==========================================================
 
 
 def get_media_url(media_id: str, token: str):
     url = f"https://graph.facebook.com/v20.0/{media_id}"
     resp = httpx.get(url, headers={"Authorization": f"Bearer {token}"})
     resp.raise_for_status()
-    return resp.json()["url"]
+    return resp.json().get("url")
 
 
 def download_media(media_url: str, token: str):
@@ -126,15 +97,13 @@ def transcribe_audio(audio_bytes: bytes):
 # ==========================================================
 # WEBHOOK VERIFY
 # ==========================================================
-
-
 @router.get("/webhook")
 async def verify(request: Request):
     mode = request.query_params.get("hub.mode")
     token = request.query_params.get("hub.verify_token")
     challenge = request.query_params.get("hub.challenge")
 
-    if mode == "subscribe" and token == VERIFY_TOKEN:
+    if mode == "subscribe" and token == config.verify_token:
         return Response(content=challenge, media_type="text/plain")
 
     return Response(content="verify token mismatch", status_code=403)
@@ -143,69 +112,79 @@ async def verify(request: Request):
 # ==========================================================
 # WEBHOOK WHATSAPP
 # ==========================================================
-
-
 @router.post("/webhook")
 async def receive_data(request: Request):
     raw_data = await parse_request_json(request)
 
-    logger.info("====== RAW WHATSAPP PAYLOAD ======")
-    logger.info(raw_data)
-    logger.info("===================================")
-
-    log_statuses(raw_data)
-
-    phone_id = raw_data["entry"][0]["changes"][0]["value"]["metadata"].get(
-        "phone_number_id"
+    phone_id = (
+        raw_data.get("entry", [{}])[0]
+        .get("changes", [{}])[0]
+        .get("value", {})
+        .get("metadata", {})
+        .get("phone_number_id")
     )
     client = await get_business(phone_id)
 
-    whatsapp_token = client.get("Access Token") if client else WHATSAPP_TOKEN
-    phone_number_id = client.get("Phone Number ID") if client else PHONE_NUMBER_ID
-    sheet_crm_id = client.get("Sheet CRM ID") if client else None
+    whatsapp_token = safe_get(client, "Access Token")
+    phone_number_id = safe_get(client, "Phone Number ID")
+    sheet_crm_id = safe_get(client, "Sheet CRM ID")
+
+    if not (whatsapp_token and phone_number_id):
+        logger.info(f"Mensaje a {phone_id}: Entrega fallida (credenciales incompletas)")
+        return {"status": "error", "message": "Credenciales incompletas"}
 
     user_info = extract_whatsapp_user_info(raw_data)
-
     transformed = dispatch_message(raw_data)
+    if not transformed:
+        return {"status": "no_message"}
 
     message = transformed.get("message") or transformed.get("text")
     from_number = transformed.get("from")
     reply_to_id = transformed.get("wamid")
-    canal = transformed.get("canal", "whatsapp")
 
+    # AUDIO
     media_id = transformed.get("media_id")
     msg_type = transformed.get("type")
-
     if msg_type == "audio" and media_id:
         try:
             media_url = get_media_url(media_id, whatsapp_token)
             audio_bytes = download_media(media_url, whatsapp_token)
             transcript = transcribe_audio(audio_bytes)
             message = transcript
-        except Exception as e:
-            logger.error(f"Error procesando audio: {e}")
+        except Exception:
             message = "No pude procesar tu audio."
 
     if not message:
         return {"status": "no_message"}
 
-    user_defaults = {"Usuario": user_info.get("usuario", from_number), "Canal": canal}
-
+    user_defaults = {
+        "Usuario": user_info.get("usuario", from_number),
+        "Canal": "whatsapp",
+    }
     user_data = await get_or_create_user(
         from_number, sheet_crm_id, defaults=user_defaults
     )
+    if not user_data:
+        user_data = {}
 
-    # ✅ Sacar estado del CRM
     estado = (user_data.get("Estado") or "").strip()
-
-    # ✅ Cargar instrucciones correctas según el estado/rol
     instructions = await load_instructions_for_user(estado, client)
+    session_key = from_number
 
-    # ✅ Ejecutar agente con SYSTEM del doc correcto
-    reply = await run_agent(message, system_doc=instructions, user_data=user_data)
+    reply_dict = await agent_service(
+        user_message=message,
+        system_instructions=instructions,
+        session_key=session_key,
+        user_data=user_data,
+    )
+    reply = reply_dict.get("final_output", "No pude generar respuesta.")
 
     await send_whatsapp_message(
-        from_number, reply, reply_to_id, whatsapp_token, phone_number_id
+        to=from_number,
+        body=reply,
+        reply_to_id=reply_to_id,
+        token=whatsapp_token,
+        phone_number_id=phone_number_id,
     )
 
     return {"status": "ok", "user_data": user_data}

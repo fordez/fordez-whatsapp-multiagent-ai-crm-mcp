@@ -5,7 +5,12 @@ from datetime import datetime
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
-from whatsapp.config import SERVICE_ACCOUNT_FILE, SHEET_NAME_LEAD, TIMEZONE, logger
+from whatsapp.config import config
+
+# Obtener variables del config
+SERVICE_ACCOUNT_FILE = config.get_service_account_file_path()
+SHEET_NAME_LEAD = config.sheet_name_lead
+TIMEZONE = config.timezone
 
 
 def normalize_number(number: str) -> str:
@@ -39,15 +44,11 @@ async def load_user(phone_number: str, spreadsheet_id: str) -> dict:
 
         for idx, row in enumerate(rows, start=2):  # start=2 porque fila 1 son headers
             if normalize_number(row.get("Telefono")) == key:
-                logger.info(f"🟦 Sheet - Usuario {phone_number} encontrado: {row}")
-                # Agregar índice de fila para actualizaciones
                 row["_row_index"] = idx
                 return row
 
-        logger.warning(f"⚠️ Usuario {phone_number} no encontrado en Sheets")
         return None
-    except Exception as e:
-        logger.error(f"❌ Error cargando usuario {phone_number} desde Sheets: {e}")
+    except Exception:
         return None
 
 
@@ -61,38 +62,25 @@ async def update_user_fields(
     try:
         user = await load_user(phone_number, spreadsheet_id)
         if not user:
-            logger.warning(
-                f"⚠️ No se puede actualizar, usuario {phone_number} no existe"
-            )
             return None
 
         row_index = user.get("_row_index")
         if not row_index:
-            logger.error(f"❌ No se pudo obtener el índice de fila para {phone_number}")
             return None
 
         sheet = get_sheet(spreadsheet_id)
         headers = sheet.row_values(1)
 
         # Actualizar solo los campos especificados que tengan valor
-        updated_fields = []
         for field, value in updates.items():
             if field in headers and value:  # Solo actualizar si hay valor
                 col_index = headers.index(field) + 1  # +1 porque gspread usa 1-indexed
                 sheet.update_cell(row_index, col_index, value)
-                updated_fields.append(field)
-                logger.info(
-                    f"✅ Campo '{field}' actualizado a '{value}' para {phone_number}"
-                )
-
-        if updated_fields:
-            logger.info(f"📝 Campos actualizados: {', '.join(updated_fields)}")
 
         # Retornar usuario actualizado
         return await load_user(phone_number, spreadsheet_id)
 
-    except Exception as e:
-        logger.error(f"❌ Error actualizando usuario {phone_number}: {e}")
+    except Exception:
         return None
 
 
@@ -105,7 +93,6 @@ async def create_user(
     # Evitar duplicados: revisamos antes
     existing_user = await load_user(phone_number, spreadsheet_id)
     if existing_user:
-        logger.info(f"🟢 Usuario {phone_number} ya existe, no se creará duplicado")
         return existing_user
 
     try:
@@ -129,14 +116,9 @@ async def create_user(
         }
 
         sheet.append_row(list(new_row.values()))
-        logger.info(f"🟦 Sheet - Usuario {phone_number} creado con éxito")
-        logger.info(
-            f"📋 Datos: Canal={new_row['Canal']}, Usuario={new_row['Usuario']}, Nombre={new_row['Nombre']}"
-        )
         return new_row
 
-    except Exception as e:
-        logger.error(f"❌ Error creando usuario {phone_number}: {e}")
+    except Exception:
         return None
 
 
@@ -159,21 +141,18 @@ async def get_or_create_user(
         new_canal = defaults.get("Canal", "")
         if new_canal and current_canal != new_canal:
             updates["Canal"] = new_canal
-            logger.info(f"🔄 Canal cambiado de '{current_canal}' a '{new_canal}'")
 
         # Actualizar Usuario si es diferente
         current_usuario = user.get("Usuario", "")
         new_usuario = defaults.get("Usuario", "")
         if new_usuario and current_usuario != new_usuario:
             updates["Usuario"] = new_usuario
-            logger.info(f"🔄 Usuario cambiado de '{current_usuario}' a '{new_usuario}'")
 
         # Actualizar Nombre si viene vacío y ahora tiene valor
         current_nombre = user.get("Nombre", "").strip()
         new_nombre = defaults.get("Nombre", "").strip()
         if new_nombre and not current_nombre:
             updates["Nombre"] = new_nombre
-            logger.info(f"🔄 Nombre agregado: '{new_nombre}'")
 
         # Si hay actualizaciones, aplicarlas
         if updates:

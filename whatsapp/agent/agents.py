@@ -1,62 +1,96 @@
+"""
+Servicio de agente con herramientas nativas (sin MCP Server).
+Migrado para mejor latencia y rendimiento con memoria local SQLite.
+Archivos SQLite guardados en la carpeta 'memory/'.
+"""
+
+import os
+
 from agents import Agent, Runner
+from agents.extensions.memory import AdvancedSQLiteSession
+from agents.model_settings import ModelSettings
 
-from whatsapp.agent.load_instruction import load_instructions_from_doc
-from whatsapp.config import AGENT_NAME, logger
+from whatsapp.agent.tools import ALL_TOOLS
+from whatsapp.config import config
 
-# Cache local para instrucciones
-INSTRUCTIONS_CACHE = {}
+# Carpeta donde se guardarán las bases de datos SQLite
+MEMORY_DIR = "memory"
+os.makedirs(MEMORY_DIR, exist_ok=True)
+
+# Sesiones persistentes por usuario con memoria SQLite
+SESSIONS: dict[str, AdvancedSQLiteSession] = {}
 
 
-async def agent_service(question: str, role_qualifier_id: str = None):
+async def get_user_session(session_key: str) -> AdvancedSQLiteSession:
+    """Obtiene o crea una sesión SQLite avanzada para el usuario."""
+    if session_key not in SESSIONS:
+        # Ruta completa para la base de datos del usuario
+        db_path = os.path.join(MEMORY_DIR, f"{session_key}.db")
+        SESSIONS[session_key] = AdvancedSQLiteSession(
+            session_id=session_key, db_path=db_path, create_tables=True
+        )
+    return SESSIONS[session_key]
+
+
+async def agent_service(
+    user_message: str,
+    system_instructions: str,
+    session_key: str,
+    user_data: dict | None = None,
+) -> dict:
     """
-    Ejecuta el agente con las instrucciones correspondientes y devuelve
-    siempre un dict con 'final_output' como string para evitar errores de serialización.
+    Ejecuta el agente con herramientas nativas y memoria local SQLite.
     """
     try:
-        # =============================
-        # Cargar instrucciones con cache
-        # =============================
-        if role_qualifier_id:
-            if role_qualifier_id in INSTRUCTIONS_CACHE:
-                instructions = INSTRUCTIONS_CACHE[role_qualifier_id]
-                logger.info(
-                    f"🟢 Usando cache de instrucciones para role_qualifier_id={role_qualifier_id}"
-                )
-            else:
-                instructions = load_instructions_from_doc(role_qualifier_id)
-                INSTRUCTIONS_CACHE[role_qualifier_id] = instructions
-                logger.info(
-                    f"📄 Instrucciones cargadas desde Google Docs para role_qualifier_id={role_qualifier_id}"
-                )
-        else:
-            instructions = "Hola, soy tu asistente, instrucciones genéricas."
-            logger.info("📄 Usando instrucciones genéricas")
+        session = await get_user_session(session_key)
 
-        # Log opcional: primeras 200 chars
-        logger.debug(
-            f"Instrucciones usadas: {str(instructions)[:200]}{'...' if len(str(instructions)) > 200 else ''}"
+        # Preparar contexto adicional con user_data
+        context_message = ""
+        if user_data:
+            context_parts = [f"{k}: {v}" for k, v in user_data.items()]
+            context_message = "Información del usuario:\n" + "\n".join(context_parts)
+
+        final_prompt = (
+            f"{context_message}\n\nMensaje del usuario: {user_message}"
+            if context_message
+            else user_message
         )
 
-        # =============================
-        # Ejecutar agente
-        # =============================
+        # Crear agente con herramientas nativas
         agent = Agent(
-            name=AGENT_NAME,
-            instructions=instructions,
+            name=config.agent_name,
+            instructions=system_instructions,
+            tools=ALL_TOOLS,
+            model_settings=ModelSettings(tool_choice="auto"),
         )
 
-        result = await Runner.run(agent, question)
+        # Ejecutar agente usando la memoria SQLite
+        result = await Runner.run(agent, final_prompt, session=session)
 
-        # Extraer final_output
-        if hasattr(result, "final_output"):
-            output = str(result.final_output)
-        elif isinstance(result, dict):
-            output = str(result.get("final_output", str(result)))
-        else:
-            output = str(result)
+        # Almacenar información de uso y tokenización
+        await session.store_run_usage(result)
 
-        return {"final_output": output}
+        final_output = getattr(result, "final_output", str(result))
+        return {"final_output": final_output}
 
     except Exception as e:
-        logger.error(f"❌ Error ejecutando agente: {e}")
-        return {"error": str(e), "final_output": f"Ocurrió un error: {e}"}
+        return {
+            "final_output": "Lo siento, ocurrió un error al procesar tu solicitud. Por favor, intenta nuevamente.",
+            "error": str(e),
+        }
+
+
+def clear_user_session(session_key: str) -> bool:
+    """Limpia la sesión de un usuario específico y su memoria SQLite."""
+    if session_key in SESSIONS:
+        del SESSIONS[session_key]
+        db_path = os.path.join(MEMORY_DIR, f"{session_key}.db")
+        if os.path.exists(db_path):
+            os.remove(db_path)  # Elimina el archivo SQLite del disco
+        return True
+    return False
+
+
+def get_active_sessions_count() -> int:
+    """Retorna el número de sesiones activas."""
+    return len(SESSIONS)
