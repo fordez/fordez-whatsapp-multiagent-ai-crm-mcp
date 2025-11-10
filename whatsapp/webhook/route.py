@@ -10,6 +10,7 @@ from whatsapp.agent.load_instruction import load_instructions_for_user
 from whatsapp.config import config
 from whatsapp.webhook.request.dispatcher import dispatch_message
 from whatsapp.webhook.response.reply import send_text
+from whatsapp.webhook.response.typing import send_typing_indicator
 from whatsapp.webhook.utilis.client_credentials import get_client_credentials
 from whatsapp.webhook.utilis.user_verify import get_or_create_user
 
@@ -129,13 +130,13 @@ async def receive_data(request: Request):
     whatsapp_token = safe_get(client, "Access Token")
     phone_number_id = safe_get(client, "Phone Number ID")
     sheet_crm_id = safe_get(client, "Sheet CRM ID")
-    role_id = safe_get(client, "Role ID")  # <-- único Role ID
+    role_id = safe_get(client, "Role ID")
 
     if not (whatsapp_token and phone_number_id and role_id):
         logger.info(f"Mensaje a {phone_id}: Credenciales incompletas")
         return {"status": "error", "message": "Credenciales incompletas"}
 
-    user_info = extract_whatsapp_user_info(raw_data)
+    # Transformar mensaje del webhook
     transformed = dispatch_message(raw_data)
     if not transformed:
         return {"status": "no_message"}
@@ -143,6 +144,19 @@ async def receive_data(request: Request):
     message = transformed.get("message") or transformed.get("text")
     from_number = transformed.get("from")
     reply_to_id = transformed.get("wamid")
+
+    # ✅ TYPING JUSTO AQUÍ (primer punto seguro)
+    if reply_to_id:
+        asyncio.create_task(
+            send_typing_indicator(
+                message_id=reply_to_id,
+                token=whatsapp_token,
+                phone_number_id=phone_number_id,
+            )
+        )
+
+    # Obtener nombre del usuario
+    user_info = extract_whatsapp_user_info(raw_data)
 
     # Procesar audio
     media_id = transformed.get("media_id")
@@ -169,7 +183,6 @@ async def receive_data(request: Request):
     if not user_data:
         user_data = {}
 
-    # Usar solo Role ID para cargar instrucciones
     instructions = await load_instructions_for_user(role_id, client)
     session_key = from_number
 

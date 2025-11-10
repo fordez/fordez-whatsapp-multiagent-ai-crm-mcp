@@ -1,4 +1,3 @@
-# whatsapp/config.py
 import json
 import logging
 import os
@@ -19,7 +18,11 @@ if not logger.handlers:
 
 class Config:
     def __init__(self):
+        # Entorno
         self.is_prod = os.getenv("ENVIRONMENT", "development") == "production"
+
+        # ✅ Verify Token para Webhook (lo que faltaba)
+        self.verify_token = os.getenv("VERIFY_TOKEN", "fordez-token")
 
         # OpenAI
         self.openai_api_key = os.getenv("OPENAI_API_KEY")
@@ -30,18 +33,19 @@ class Config:
             os.getenv("SCOPES", "https://www.googleapis.com/auth/spreadsheets")
         ]
 
-        # Servicio account
+        # Service Account
         self.service_account_file = os.getenv(
             "SERVICE_ACCOUNT_FILE", "secrets/credentials-dev.json"
         )
         self.service_account_json = None
+
         if self.is_prod:
-            # En producción, opcionalmente pasar JSON literal en ENV
+            # En producción puedes pasar el JSON literal por env
             env_json = os.getenv("SERVICE_ACCOUNT_JSON")
             if env_json:
                 self.service_account_json = json.loads(env_json)
             else:
-                # Si no, cargar desde archivo
+                # Si no existe, cargar desde archivo
                 with open(self.service_account_file) as f:
                     self.service_account_json = json.load(f)
 
@@ -66,6 +70,7 @@ class Config:
         self.timezone = pytz.timezone(timezone_str)
 
     def get_service_account_file_path(self):
+        # Devuelve el archivo solo en dev
         return self.service_account_file if not self.is_prod else None
 
 
