@@ -125,12 +125,14 @@ async def receive_data(request: Request):
     )
     client = await get_business(phone_id)
 
+    # Solo campos necesarios
     whatsapp_token = safe_get(client, "Access Token")
     phone_number_id = safe_get(client, "Phone Number ID")
     sheet_crm_id = safe_get(client, "Sheet CRM ID")
+    role_id = safe_get(client, "Role ID")  # <-- único Role ID
 
-    if not (whatsapp_token and phone_number_id):
-        logger.info(f"Mensaje a {phone_id}: Entrega fallida (credenciales incompletas)")
+    if not (whatsapp_token and phone_number_id and role_id):
+        logger.info(f"Mensaje a {phone_id}: Credenciales incompletas")
         return {"status": "error", "message": "Credenciales incompletas"}
 
     user_info = extract_whatsapp_user_info(raw_data)
@@ -142,7 +144,7 @@ async def receive_data(request: Request):
     from_number = transformed.get("from")
     reply_to_id = transformed.get("wamid")
 
-    # AUDIO
+    # Procesar audio
     media_id = transformed.get("media_id")
     msg_type = transformed.get("type")
     if msg_type == "audio" and media_id:
@@ -167,8 +169,8 @@ async def receive_data(request: Request):
     if not user_data:
         user_data = {}
 
-    estado = (user_data.get("Estado") or "").strip()
-    instructions = await load_instructions_for_user(estado, client)
+    # Usar solo Role ID para cargar instrucciones
+    instructions = await load_instructions_for_user(role_id, client)
     session_key = from_number
 
     reply_dict = await agent_service(
