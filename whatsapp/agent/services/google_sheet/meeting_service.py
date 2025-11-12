@@ -1,13 +1,15 @@
 from datetime import datetime
 
-from whatsapp.agent.services.google_sheet.gspread_helper import get_gspread_client
+from whatsapp.agent.services.google_sheet.gspread_helper import (
+    get_gspread_client,
+    get_spreadsheet_id_from_context,
+)
 from whatsapp.config import config
 
 # Inicializar cliente gspread usando el módulo compartido
 gc = get_gspread_client(service_name="MeetingService")
 
 # Variables de configuración desde config
-SPREADSHEET_ID = config.spreadsheet_id_services
 SHEET_NAME_MEETINGS = config.sheet_name_meetings
 TIMEZONE = config.timezone
 
@@ -23,6 +25,7 @@ class MeetingService:
         meet_link: str = None,
         calendar_link: str = None,
         estado: str = "Programada",
+        ctx=None,
     ) -> dict:
         try:
             if not event_id or not asunto or not fecha_inicio or not id_cliente:
@@ -31,7 +34,8 @@ class MeetingService:
                     "error": "Campos requeridos: event_id, asunto, fecha_inicio e id_cliente",
                 }
 
-            sh = gc.open_by_key(SPREADSHEET_ID)
+            spreadsheet_id = get_spreadsheet_id_from_context(ctx)
+            sh = gc.open_by_key(spreadsheet_id)
             worksheet = sh.worksheet(SHEET_NAME_MEETINGS)
             all_records = worksheet.get_all_records()
             next_row = len(all_records) + 2
@@ -44,6 +48,8 @@ class MeetingService:
                 fecha_inicio_dt = datetime.fromisoformat(fecha_inicio)
                 if fecha_inicio_dt.tzinfo is None:
                     fecha_inicio_dt = tz.localize(fecha_inicio_dt)
+                else:
+                    fecha_inicio_dt = fecha_inicio_dt.astimezone(tz)
             except ValueError:
                 fecha_inicio_dt = datetime.strptime(fecha_inicio, "%Y-%m-%d %H:%M:%S")
                 fecha_inicio_dt = tz.localize(fecha_inicio_dt)
@@ -77,34 +83,36 @@ class MeetingService:
             return {"success": False, "error": str(e)}
 
     @staticmethod
-    def get_meeting_by_id(calendar_id: str) -> dict:
+    def get_meeting_by_id(event_id: str, ctx=None) -> dict:
         try:
-            if not calendar_id:
-                return {"success": False, "error": "calendar_id requerido"}
+            if not event_id:
+                return {"success": False, "error": "event_id requerido"}
 
-            sh = gc.open_by_key(SPREADSHEET_ID)
+            spreadsheet_id = get_spreadsheet_id_from_context(ctx)
+            sh = gc.open_by_key(spreadsheet_id)
             worksheet = sh.worksheet(SHEET_NAME_MEETINGS)
             all_records = worksheet.get_all_records()
 
-            for row in all_records:
-                if str(row.get("Id")) == str(calendar_id):
-                    return {"success": True, "meeting": row}
+            for idx, row in enumerate(all_records, start=2):
+                if str(row.get("Id")) == str(event_id):
+                    return {"success": True, "meeting": row, "row_index": idx}
 
             return {
                 "success": False,
-                "error": f"No se encontró reunión con ID '{calendar_id}'",
+                "error": f"No se encontró reunión con ID '{event_id}'",
             }
 
         except Exception as e:
             return {"success": False, "error": str(e)}
 
     @staticmethod
-    def get_meetings_by_client(id_cliente: str) -> dict:
+    def get_meetings_by_client(id_cliente: str, ctx=None) -> dict:
         try:
             if not id_cliente:
                 return {"success": False, "error": "id_cliente requerido"}
 
-            sh = gc.open_by_key(SPREADSHEET_ID)
+            spreadsheet_id = get_spreadsheet_id_from_context(ctx)
+            sh = gc.open_by_key(spreadsheet_id)
             worksheet = sh.worksheet(SHEET_NAME_MEETINGS)
             all_records = worksheet.get_all_records()
 
@@ -119,12 +127,13 @@ class MeetingService:
             return {"success": False, "error": str(e)}
 
     @staticmethod
-    def get_meetings_by_date(fecha_inicio: str) -> dict:
+    def get_meetings_by_date(fecha_inicio: str, ctx=None) -> dict:
         try:
             if not fecha_inicio:
                 return {"success": False, "error": "fecha_inicio requerida"}
 
-            sh = gc.open_by_key(SPREADSHEET_ID)
+            spreadsheet_id = get_spreadsheet_id_from_context(ctx)
+            sh = gc.open_by_key(spreadsheet_id)
             worksheet = sh.worksheet(SHEET_NAME_MEETINGS)
             all_records = worksheet.get_all_records()
 
@@ -146,14 +155,16 @@ class MeetingService:
             return {"success": False, "error": str(e)}
 
     @staticmethod
-    def update_meeting(calendar_id: str, fields: dict) -> dict:
-        if not calendar_id:
-            return {"success": False, "error": "calendar_id requerido"}
+    def update_meeting(event_id: str, fields: dict, ctx=None) -> dict:
+        """Actualiza una reunión existente en lugar de crear un duplicado."""
+        if not event_id:
+            return {"success": False, "error": "event_id requerido"}
         if not fields:
             return {"success": False, "error": "No se proporcionaron campos"}
 
         try:
-            sh = gc.open_by_key(SPREADSHEET_ID)
+            spreadsheet_id = get_spreadsheet_id_from_context(ctx)
+            sh = gc.open_by_key(spreadsheet_id)
             worksheet = sh.worksheet(SHEET_NAME_MEETINGS)
             all_records = worksheet.get_all_records()
 
@@ -169,47 +180,63 @@ class MeetingService:
                 "Id Cliente": 9,
             }
 
+            tz = TIMEZONE
+
             for idx, row in enumerate(all_records, start=2):
-                if str(row.get("Id")) == str(calendar_id):
+                if str(row.get("Id")) == str(event_id):
                     for key, value in fields.items():
                         col = col_map.get(key)
                         if col:
+                            # Formatear fecha si es "Fecha Inicio"
+                            if key == "Fecha Inicio" and value:
+                                try:
+                                    fecha_dt = datetime.fromisoformat(value)
+                                    if fecha_dt.tzinfo is None:
+                                        fecha_dt = tz.localize(fecha_dt)
+                                    else:
+                                        fecha_dt = fecha_dt.astimezone(tz)
+                                    value = fecha_dt.strftime("%d/%m/%Y %H:%M")
+                                except:
+                                    pass  # Si falla, usar valor original
+
                             worksheet.update_cell(idx, col, value)
+
                     return {
                         "success": True,
-                        "calendar_id": calendar_id,
+                        "event_id": event_id,
                         "updated_fields": list(fields.keys()),
                     }
 
             return {
                 "success": False,
-                "error": f"No se encontró reunión con ID '{calendar_id}'",
+                "error": f"No se encontró reunión con ID '{event_id}'",
             }
 
         except Exception as e:
             return {"success": False, "error": str(e)}
 
     @staticmethod
-    def delete_meeting(calendar_id: str) -> dict:
-        if not calendar_id:
-            return {"success": False, "error": "calendar_id requerido"}
+    def delete_meeting(event_id: str, ctx=None) -> dict:
+        if not event_id:
+            return {"success": False, "error": "event_id requerido"}
 
         try:
-            sh = gc.open_by_key(SPREADSHEET_ID)
+            spreadsheet_id = get_spreadsheet_id_from_context(ctx)
+            sh = gc.open_by_key(spreadsheet_id)
             worksheet = sh.worksheet(SHEET_NAME_MEETINGS)
             all_records = worksheet.get_all_records()
 
             for idx, row in enumerate(all_records, start=2):
-                if str(row.get("Id")) == str(calendar_id):
+                if str(row.get("Id")) == str(event_id):
                     worksheet.delete_rows(idx)
                     return {
                         "success": True,
-                        "message": f"Reunión '{calendar_id}' eliminada",
+                        "message": f"Reunión '{event_id}' eliminada",
                     }
 
             return {
                 "success": False,
-                "error": f"No se encontró reunión con ID '{calendar_id}'",
+                "error": f"No se encontró reunión con ID '{event_id}'",
             }
 
         except Exception as e:

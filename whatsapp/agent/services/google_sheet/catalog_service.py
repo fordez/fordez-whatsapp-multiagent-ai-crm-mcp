@@ -1,22 +1,25 @@
-from whatsapp.agent.services.google_sheet.gspread_helper import get_gspread_client
+from whatsapp.agent.services.google_sheet.gspread_helper import (
+    get_gspread_client,
+    get_spreadsheet_id_from_context,
+)
 from whatsapp.config import config
 
 # Inicializamos el cliente gspread usando el módulo compartido
 gc = get_gspread_client(service_name="CatalogService")
 
 # Usamos directamente las variables de config
-SPREADSHEET_ID = config.spreadsheet_id_services  # hoja de servicios
 SHEET_NAME = config.sheet_name_catalog
 
 
 class CatalogService:
     @staticmethod
-    def get_all_services() -> dict:
+    def get_all_services(ctx=None) -> dict:
         """
         Obtiene todos los servicios del catálogo desde Google Sheets.
         """
         try:
-            sh = gc.open_by_key(SPREADSHEET_ID)
+            spreadsheet_id = get_spreadsheet_id_from_context(ctx)
+            sh = gc.open_by_key(spreadsheet_id)
             worksheet = sh.worksheet(SHEET_NAME)
             all_records = worksheet.get_all_records()
             return {"success": True, "services": all_records}
@@ -24,12 +27,13 @@ class CatalogService:
             return {"success": False, "error": str(e)}
 
     @staticmethod
-    def get_service_by_name(service_name: str) -> dict:
+    def get_service_by_name(service_name: str, ctx=None) -> dict:
         """
         Busca un servicio por su nombre dentro del catálogo.
         """
         try:
-            sh = gc.open_by_key(SPREADSHEET_ID)
+            spreadsheet_id = get_spreadsheet_id_from_context(ctx)
+            sh = gc.open_by_key(spreadsheet_id)
             worksheet = sh.worksheet(SHEET_NAME)
             all_records = worksheet.get_all_records()
 

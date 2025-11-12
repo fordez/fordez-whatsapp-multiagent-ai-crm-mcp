@@ -4,25 +4,28 @@ import gspread
 import pytz
 import shortuuid
 
-from whatsapp.agent.services.google_sheet.gspread_helper import get_gspread_client
+from whatsapp.agent.services.google_sheet.gspread_helper import (
+    get_gspread_client,
+    get_spreadsheet_id_from_context,
+)
 from whatsapp.config import config
 
 # Inicializamos el cliente gspread usando el módulo compartido
 gc = get_gspread_client(service_name="CRMService")
 
 # Variables de config
-SPREADSHEET_ID = config.spreadsheet_id_services  # hoja de servicios/CRM
 SHEET_NAME = config.sheet_name_lead
 TIMEZONE = config.timezone
 
 
 class CRMService:
     @staticmethod
-    def resolve_client_id(client_id_or_phone: str) -> str | None:
+    def resolve_client_id(client_id_or_phone: str, ctx=None) -> str | None:
         if not client_id_or_phone:
             return None
 
-        sh = gc.open_by_key(SPREADSHEET_ID)
+        spreadsheet_id = get_spreadsheet_id_from_context(ctx)
+        sh = gc.open_by_key(spreadsheet_id)
         worksheet = sh.worksheet(SHEET_NAME)
         all_records = worksheet.get_all_records()
         phone_norm = "".join(filter(str.isdigit, str(client_id_or_phone)))
@@ -35,12 +38,13 @@ class CRMService:
         return None
 
     @staticmethod
-    def verify_client(telefono=None, correo=None, usuario=None) -> dict:
+    def verify_client(telefono=None, correo=None, usuario=None, ctx=None) -> dict:
         if not telefono and not correo and not usuario:
             return {"error": "Debe proporcionar al menos un identificador"}
 
         try:
-            sh = gc.open_by_key(SPREADSHEET_ID)
+            spreadsheet_id = get_spreadsheet_id_from_context(ctx)
+            sh = gc.open_by_key(spreadsheet_id)
             worksheet = sh.worksheet(SHEET_NAME)
             all_records = worksheet.get_all_records()
             telefono_norm = (
@@ -84,7 +88,7 @@ class CRMService:
 
     @staticmethod
     def create_client_service(
-        nombre, canal, telefono=None, correo=None, nota=None, usuario=None
+        nombre, canal, telefono=None, correo=None, nota=None, usuario=None, ctx=None
     ) -> dict:
         if not nombre or not canal:
             return {
@@ -93,7 +97,8 @@ class CRMService:
             }
 
         try:
-            sh = gc.open_by_key(SPREADSHEET_ID)
+            spreadsheet_id = get_spreadsheet_id_from_context(ctx)
+            sh = gc.open_by_key(spreadsheet_id)
             worksheet = sh.worksheet(SHEET_NAME)
             all_records = worksheet.get_all_records()
             fecha_actual = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
@@ -125,13 +130,13 @@ class CRMService:
             return {"success": False, "error": str(e)}
 
     @staticmethod
-    def update_client_dynamic(client_id: str, fields: dict) -> dict:
+    def update_client_dynamic(client_id: str, fields: dict, ctx=None) -> dict:
         if not client_id:
             return {"success": False, "error": "client_id requerido"}
         if not fields:
             return {"success": False, "error": "No se proporcionaron campos"}
 
-        resolved_id = CRMService.resolve_client_id(client_id)
+        resolved_id = CRMService.resolve_client_id(client_id, ctx)
         if not resolved_id:
             return {
                 "success": False,
@@ -139,7 +144,8 @@ class CRMService:
             }
 
         try:
-            sh = gc.open_by_key(SPREADSHEET_ID)
+            spreadsheet_id = get_spreadsheet_id_from_context(ctx)
+            sh = gc.open_by_key(spreadsheet_id)
             worksheet = sh.worksheet(SHEET_NAME)
             all_records = worksheet.get_all_records()
             updated_fields = []

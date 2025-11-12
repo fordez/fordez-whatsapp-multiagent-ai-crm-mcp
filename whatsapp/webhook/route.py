@@ -129,7 +129,7 @@ async def receive_data(request: Request):
     # Solo campos necesarios
     whatsapp_token = safe_get(client, "Access Token")
     phone_number_id = safe_get(client, "Phone Number ID")
-    sheet_crm_id = safe_get(client, "Sheet CRM ID")
+    sheet_crm_id = safe_get(client, "Sheet CRM ID")  # ✅ pasamos al agente
     role_id = safe_get(client, "Role ID")
 
     if not (whatsapp_token and phone_number_id and role_id):
@@ -145,7 +145,7 @@ async def receive_data(request: Request):
     from_number = transformed.get("from")
     reply_to_id = transformed.get("wamid")
 
-    # ✅ TYPING JUSTO AQUÍ (primer punto seguro)
+    # ✅ Mostrar "escribiendo..." antes de responder
     if reply_to_id:
         asyncio.create_task(
             send_typing_indicator(
@@ -158,7 +158,7 @@ async def receive_data(request: Request):
     # Obtener nombre del usuario
     user_info = extract_whatsapp_user_info(raw_data)
 
-    # Procesar audio
+    # Procesar audio si aplica
     media_id = transformed.get("media_id")
     msg_type = transformed.get("type")
     if msg_type == "audio" and media_id:
@@ -173,6 +173,7 @@ async def receive_data(request: Request):
     if not message:
         return {"status": "no_message"}
 
+    # Datos básicos del usuario (sin lógica CRM)
     user_defaults = {
         "Usuario": user_info.get("usuario", from_number),
         "Canal": "whatsapp",
@@ -186,12 +187,15 @@ async def receive_data(request: Request):
     instructions = await load_instructions_for_user(role_id, client)
     session_key = from_number
 
+    # ✅ Enviar también sheet_crm_id al agente
     reply_dict = await agent_service(
         user_message=message,
         system_instructions=instructions,
         session_key=session_key,
         user_data=user_data,
+        sheet_crm_id=sheet_crm_id,  # ✅ agregado
     )
+
     reply = reply_dict.get("final_output", "No pude generar respuesta.")
 
     await send_whatsapp_message(

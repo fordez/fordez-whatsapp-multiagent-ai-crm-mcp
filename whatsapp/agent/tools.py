@@ -1,12 +1,13 @@
 """
 Herramientas para agente de servicio al cliente.
 Scope limitado por seguridad - solo operaciones esenciales.
+Ahora todas las tools usan RunContextWrapper para manejar el contexto.
 """
 
 from datetime import datetime
 from typing import Any, Dict
 
-from agents import function_tool
+from agents import RunContextWrapper, function_tool
 
 # Importar modelos
 from whatsapp.agent.models import (
@@ -24,6 +25,8 @@ from whatsapp.agent.models import (
     UpdateProjectNoteByClientInput,
     VerifyClientInput,
 )
+
+# Importar servicios
 from whatsapp.agent.services.google_calendar_meet.calendar_service import (
     CalendarService,
 )
@@ -38,15 +41,18 @@ from whatsapp.agent.services.google_sheet.project_service import ProjectService
 
 
 @function_tool
-def verify_client(input: VerifyClientInput) -> Dict[str, Any]:
+def verify_client(ctx: RunContextWrapper, input: VerifyClientInput) -> Dict[str, Any]:
     """Verifica si un cliente existe en el CRM usando teléfono, correo o usuario."""
     return CRMService.verify_client(
-        telefono=input.telefono, correo=input.correo, usuario=input.usuario
+        telefono=input.telefono,
+        correo=input.correo,
+        usuario=input.usuario,
+        ctx=ctx.context,
     )
 
 
 @function_tool
-def create_client(input: CreateClientInput) -> Dict[str, Any]:
+def create_client(ctx: RunContextWrapper, input: CreateClientInput) -> Dict[str, Any]:
     """Crea un nuevo cliente en el CRM."""
     result = CRMService.create_client_service(
         nombre=input.nombre,
@@ -55,6 +61,7 @@ def create_client(input: CreateClientInput) -> Dict[str, Any]:
         correo=input.correo,
         nota=input.nota,
         usuario=input.usuario,
+        ctx=ctx.context,
     )
     return {
         "success": result.get("success", False),
@@ -64,7 +71,7 @@ def create_client(input: CreateClientInput) -> Dict[str, Any]:
 
 
 @function_tool
-def update_client(input: UpdateClientInput) -> Dict[str, Any]:
+def update_client(ctx: RunContextWrapper, input: UpdateClientInput) -> Dict[str, Any]:
     """Actualiza información básica de un cliente (solo nombre, correo o usuario)."""
     fields = {}
     if input.nombre is not None:
@@ -80,24 +87,34 @@ def update_client(input: UpdateClientInput) -> Dict[str, Any]:
             "error": "No se proporcionaron campos para actualizar",
         }
 
-    result = CRMService.update_client_dynamic(client_id=input.client_id, fields=fields)
-    return {"success": True, "data": result}
-
-
-@function_tool
-def update_client_note(input: UpdateClientNoteInput) -> Dict[str, Any]:
-    """Actualiza la nota de un cliente existente."""
     result = CRMService.update_client_dynamic(
-        client_id=input.client_id, fields={"Nota": input.nota}
+        client_id=input.client_id, fields=fields, ctx=ctx.context
     )
     return {"success": True, "data": result}
 
 
 @function_tool
-def update_client_status(input: UpdateClientStatusInput) -> Dict[str, Any]:
+def update_client_note(
+    ctx: RunContextWrapper, input: UpdateClientNoteInput
+) -> Dict[str, Any]:
+    """Actualiza la nota de un cliente existente."""
+    result = CRMService.update_client_dynamic(
+        client_id=input.client_id,
+        fields={"Nota": input.nota},
+        ctx=ctx.context,
+    )
+    return {"success": True, "data": result}
+
+
+@function_tool
+def update_client_status(
+    ctx: RunContextWrapper, input: UpdateClientStatusInput
+) -> Dict[str, Any]:
     """Actualiza el estado de un cliente."""
     result = CRMService.update_client_dynamic(
-        client_id=input.client_id, fields={"Estado": input.estado}
+        client_id=input.client_id,
+        fields={"Estado": input.estado},
+        ctx=ctx.context,
     )
     return {"success": True, "data": result}
 
@@ -108,15 +125,17 @@ def update_client_status(input: UpdateClientStatusInput) -> Dict[str, Any]:
 
 
 @function_tool
-def get_all_services() -> Dict[str, Any]:
+def get_all_services(ctx: RunContextWrapper) -> Dict[str, Any]:
     """Retorna todos los servicios disponibles en el catálogo."""
-    return CatalogService.get_all_services()
+    return CatalogService.get_all_services(ctx=ctx.context)
 
 
 @function_tool
-def get_service_by_name(input: GetServiceByNameInput) -> Dict[str, Any]:
+def get_service_by_name(
+    ctx: RunContextWrapper, input: GetServiceByNameInput
+) -> Dict[str, Any]:
     """Busca un servicio específico por su nombre."""
-    return CatalogService.get_service_by_name(input.service_name)
+    return CatalogService.get_service_by_name(input.service_name, ctx=ctx.context)
 
 
 # ====================================================
@@ -125,7 +144,7 @@ def get_service_by_name(input: GetServiceByNameInput) -> Dict[str, Any]:
 
 
 @function_tool
-def calendar_check_availability() -> Dict[str, Any]:
+def calendar_check_availability(ctx: RunContextWrapper) -> Dict[str, Any]:
     """Consulta disponibilidad de calendario para los próximos días hábiles."""
     result = CalendarService.check_availability()
 
@@ -140,7 +159,9 @@ def calendar_check_availability() -> Dict[str, Any]:
 
 
 @function_tool
-def calendar_create_meet(input: CalendarCreateMeetInput) -> Dict[str, Any]:
+def calendar_create_meet(
+    ctx: RunContextWrapper, input: CalendarCreateMeetInput
+) -> Dict[str, Any]:
     """Crea un evento de Google Calendar con Google Meet y lo registra en Google Sheet."""
     start_dt = datetime.fromisoformat(input.start_time)
     end_dt = datetime.fromisoformat(input.end_time)
@@ -166,14 +187,17 @@ def calendar_create_meet(input: CalendarCreateMeetInput) -> Dict[str, Any]:
         meet_link=event_data.get("meet_link"),
         calendar_link=event_data.get("calendar_link"),
         estado=event_data.get("estado", "Programada"),
+        ctx=ctx.context,
     )
 
     return {"success": sheet_result["success"], "data": sheet_result}
 
 
 @function_tool
-def calendar_update_meet(input: CalendarUpdateMeetInput) -> Dict[str, Any]:
-    """Actualiza un evento de Google Calendar (fecha/hora) y crea nuevo registro en Google Sheet."""
+def calendar_update_meet(
+    ctx: RunContextWrapper, input: CalendarUpdateMeetInput
+) -> Dict[str, Any]:
+    """Actualiza un evento de Google Calendar y actualiza el registro en Google Sheet."""
     start_dt = datetime.fromisoformat(input.start_time)
     end_dt = datetime.fromisoformat(input.end_time)
 
@@ -190,23 +214,27 @@ def calendar_update_meet(input: CalendarUpdateMeetInput) -> Dict[str, Any]:
     if not event_data.get("success"):
         return {"success": False, "error": event_data.get("error")}
 
-    # Crear nuevo registro en Sheets (mantiene historial)
-    sheet_result = MeetingService.create_meeting(
-        event_id=event_data["event_id"],
-        asunto=event_data["summary"],
-        fecha_inicio=event_data["start_time"],
-        id_cliente=input.id_cliente,
-        detalles=event_data.get("description"),
-        meet_link=event_data.get("meet_link"),
-        calendar_link=event_data.get("calendar_link"),
-        estado="Reagendada",
+    # Actualizar registro existente en Sheets
+    sheet_result = MeetingService.update_meeting(
+        event_id=input.event_id,
+        fields={
+            "Asunto": event_data["summary"],
+            "Fecha Inicio": event_data["start_time"],
+            "Detalles": event_data.get("description"),
+            "Meet_Link": event_data.get("meet_link"),
+            "Calendar_Link": event_data.get("calendar_link"),
+            "Estado": "Reagendada",
+        },
+        ctx=ctx.context,
     )
 
     return {"success": sheet_result["success"], "data": sheet_result}
 
 
 @function_tool
-def calendar_get_event_details(input: CalendarGetEventDetailsInput) -> Dict[str, Any]:
+def calendar_get_event_details(
+    ctx: RunContextWrapper, input: CalendarGetEventDetailsInput
+) -> Dict[str, Any]:
     """Obtiene los detalles completos de un evento de calendario."""
     result = CalendarService.get_event_details(input.event_id)
     return {"success": True, "data": result}
@@ -218,16 +246,20 @@ def calendar_get_event_details(input: CalendarGetEventDetailsInput) -> Dict[str,
 
 
 @function_tool
-def get_meetings_by_client(input: GetMeetingsByClientInput) -> Dict[str, Any]:
+def get_meetings_by_client(
+    ctx: RunContextWrapper, input: GetMeetingsByClientInput
+) -> Dict[str, Any]:
     """Consulta todas las reuniones de un cliente."""
-    return MeetingService.get_meetings_by_client(input.id_cliente)
+    return MeetingService.get_meetings_by_client(input.id_cliente, ctx=ctx.context)
 
 
 @function_tool
-def update_meeting_status(input: UpdateMeetingStatusInput) -> Dict[str, Any]:
+def update_meeting_status(
+    ctx: RunContextWrapper, input: UpdateMeetingStatusInput
+) -> Dict[str, Any]:
     """Actualiza el estado de una reunión en Google Sheet."""
     return MeetingService.update_meeting(
-        meeting_id=input.meeting_id, fields={"Estado": input.estado}
+        event_id=input.meeting_id, fields={"Estado": input.estado}, ctx=ctx.context
     )
 
 
@@ -237,18 +269,20 @@ def update_meeting_status(input: UpdateMeetingStatusInput) -> Dict[str, Any]:
 
 
 @function_tool
-def get_projects_by_client(input: GetProjectsByClientInput) -> Dict[str, Any]:
+def get_projects_by_client(
+    ctx: RunContextWrapper, input: GetProjectsByClientInput
+) -> Dict[str, Any]:
     """Consulta todos los proyectos de un cliente."""
-    return ProjectService.get_projects_by_client(input.id_cliente)
+    return ProjectService.get_projects_by_client(input.id_cliente, ctx=ctx.context)
 
 
 @function_tool
 def update_project_note_by_client(
-    input: UpdateProjectNoteByClientInput,
+    ctx: RunContextWrapper, input: UpdateProjectNoteByClientInput
 ) -> Dict[str, Any]:
     """Actualiza la nota de todos los proyectos de un cliente."""
     return ProjectService.update_project_note_by_client(
-        id_cliente=input.id_cliente, nota=input.nota
+        id_cliente=input.id_cliente, nota=input.nota, ctx=ctx.context
     )
 
 

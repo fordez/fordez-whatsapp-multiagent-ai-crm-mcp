@@ -1,8 +1,10 @@
 # whatsapp/agent/services/calendar_service.py
+import json
 import os
 from datetime import datetime, time, timedelta
 
 import pytz
+from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
@@ -21,9 +23,51 @@ class CalendarService:
 
     @staticmethod
     def get_credentials():
-        """Obtiene credenciales OAuth2 desde config."""
+        """Obtiene credenciales OAuth2 desde config y refresca automáticamente si es necesario."""
         creds_data = config.token_json
         creds = Credentials.from_authorized_user_info(creds_data, SCOPES)
+
+        # Refrescar token si ha expirado
+        if creds.expired and creds.refresh_token:
+            try:
+                creds.refresh(Request())
+
+                # Guardar token actualizado usando la ruta de config
+                token_file = getattr(
+                    config,
+                    "token_file",
+                    os.getenv("TOKEN_FILE", "secrets/token-dev.json"),
+                )
+                os.makedirs(os.path.dirname(token_file), exist_ok=True)
+                with open(token_file, "w") as f:
+                    json.dump(
+                        {
+                            "token": creds.token,
+                            "refresh_token": creds.refresh_token,
+                            "token_uri": creds.token_uri,
+                            "client_id": creds.client_id,
+                            "client_secret": creds.client_secret,
+                            "scopes": creds.scopes,
+                        },
+                        f,
+                        indent=2,
+                    )
+
+                # Actualizar también en la config en memoria
+                config.token_json = {
+                    "token": creds.token,
+                    "refresh_token": creds.refresh_token,
+                    "token_uri": creds.token_uri,
+                    "client_id": creds.client_id,
+                    "client_secret": creds.client_secret,
+                    "scopes": creds.scopes,
+                }
+
+                print("✅ Token de Google Calendar refrescado y guardado correctamente")
+
+            except Exception as e:
+                print(f"⚠️ Error refrescando token: {e}")
+
         return creds
 
     @staticmethod
@@ -116,12 +160,10 @@ class CalendarService:
         attendees=None,
         description=None,
     ):
-        """Actualiza un evento existente en Google Calendar."""
         service = CalendarService.get_service()
         tz = TIMEZONE
 
         try:
-            # Obtener evento existente
             event = (
                 service.events().get(calendarId="primary", eventId=event_id).execute()
             )
@@ -131,7 +173,6 @@ class CalendarService:
                     return dt if dt.tzinfo else tz.localize(dt)
                 return tz.localize(datetime.fromisoformat(dt))
 
-            # Actualizar solo los campos proporcionados
             if summary is not None:
                 event["summary"] = summary
             if description is not None:
@@ -151,7 +192,6 @@ class CalendarService:
             if attendees is not None:
                 event["attendees"] = [{"email": e} for e in attendees]
 
-            # Verificar disponibilidad si se cambian las fechas
             if start_time is not None and end_time is not None:
                 start_dt = parse(start_time)
                 end_dt = parse(end_time)
@@ -167,8 +207,8 @@ class CalendarService:
                     )
                     .execute()
                 )
+
                 busy_slots = freebusy_result["calendars"]["primary"].get("busy", [])
-                # Filtrar el evento actual de los slots ocupados
                 busy_slots = [s for s in busy_slots if s.get("id") != event_id]
                 if busy_slots:
                     return {
@@ -177,13 +217,11 @@ class CalendarService:
                         "busy_slots": busy_slots,
                     }
 
-            # Actualizar evento
             updated_event = (
                 service.events()
                 .update(calendarId="primary", eventId=event_id, body=event)
                 .execute()
             )
-
             meet_link = (
                 updated_event.get("conferenceData", {})
                 .get("entryPoints", [{}])[0]

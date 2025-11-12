@@ -1,13 +1,15 @@
 from datetime import datetime
 
-from whatsapp.agent.services.google_sheet.gspread_helper import get_gspread_client
+from whatsapp.agent.services.google_sheet.gspread_helper import (
+    get_gspread_client,
+    get_spreadsheet_id_from_context,
+)
 from whatsapp.config import config
 
 # Inicializar cliente gspread usando el módulo compartido
 gc = get_gspread_client(service_name="ProjectService")
 
 # Variables de configuración desde config
-SPREADSHEET_ID = config.spreadsheet_id_services
 SHEET_NAME_PROJECTS = config.sheet_name_projects
 TIMEZONE = config.timezone
 
@@ -23,6 +25,7 @@ class ProjectService:
         fecha_fin: str = None,
         estado: str = "En Progreso",
         nota: str = None,
+        ctx=None,
     ) -> dict:
         try:
             if not nombre or not id_cliente:
@@ -31,7 +34,8 @@ class ProjectService:
                     "error": "Campos requeridos: nombre e id_cliente",
                 }
 
-            sh = gc.open_by_key(SPREADSHEET_ID)
+            spreadsheet_id = get_spreadsheet_id_from_context(ctx)
+            sh = gc.open_by_key(spreadsheet_id)
             worksheet = sh.worksheet(SHEET_NAME_PROJECTS)
             all_records = worksheet.get_all_records()
 
@@ -63,12 +67,13 @@ class ProjectService:
             return {"success": False, "error": str(e)}
 
     @staticmethod
-    def get_project_by_id(project_id: str) -> dict:
+    def get_project_by_id(project_id: str, ctx=None) -> dict:
         try:
             if not project_id:
                 return {"success": False, "error": "project_id requerido"}
 
-            sh = gc.open_by_key(SPREADSHEET_ID)
+            spreadsheet_id = get_spreadsheet_id_from_context(ctx)
+            sh = gc.open_by_key(spreadsheet_id)
             worksheet = sh.worksheet(SHEET_NAME_PROJECTS)
             all_records = worksheet.get_all_records()
 
@@ -85,12 +90,13 @@ class ProjectService:
             return {"success": False, "error": str(e)}
 
     @staticmethod
-    def get_projects_by_client(id_cliente: str) -> dict:
+    def get_projects_by_client(id_cliente: str, ctx=None) -> dict:
         try:
             if not id_cliente:
                 return {"success": False, "error": "id_cliente requerido"}
 
-            sh = gc.open_by_key(SPREADSHEET_ID)
+            spreadsheet_id = get_spreadsheet_id_from_context(ctx)
+            sh = gc.open_by_key(spreadsheet_id)
             worksheet = sh.worksheet(SHEET_NAME_PROJECTS)
             all_records = worksheet.get_all_records()
 
@@ -105,14 +111,15 @@ class ProjectService:
             return {"success": False, "error": str(e)}
 
     @staticmethod
-    def update_project(project_id: str, fields: dict) -> dict:
+    def update_project(project_id: str, fields: dict, ctx=None) -> dict:
         if not project_id:
             return {"success": False, "error": "project_id requerido"}
         if not fields:
             return {"success": False, "error": "No se proporcionaron campos"}
 
         try:
-            sh = gc.open_by_key(SPREADSHEET_ID)
+            spreadsheet_id = get_spreadsheet_id_from_context(ctx)
+            sh = gc.open_by_key(spreadsheet_id)
             worksheet = sh.worksheet(SHEET_NAME_PROJECTS)
             all_records = worksheet.get_all_records()
 
@@ -149,12 +156,47 @@ class ProjectService:
             return {"success": False, "error": str(e)}
 
     @staticmethod
-    def delete_project(project_id: str) -> dict:
+    def update_project_note_by_client(id_cliente: str, nota: str, ctx=None) -> dict:
+        """Actualiza la nota de todos los proyectos de un cliente."""
+        if not id_cliente or not nota:
+            return {"success": False, "error": "id_cliente y nota son requeridos"}
+
+        try:
+            spreadsheet_id = get_spreadsheet_id_from_context(ctx)
+            sh = gc.open_by_key(spreadsheet_id)
+            worksheet = sh.worksheet(SHEET_NAME_PROJECTS)
+            all_records = worksheet.get_all_records()
+
+            updated_count = 0
+            for idx, row in enumerate(all_records, start=2):
+                if str(row.get("Id_Cliente")) == str(id_cliente):
+                    worksheet.update_cell(idx, 6, nota)  # Columna 6 es Nota
+                    updated_count += 1
+
+            if updated_count == 0:
+                return {
+                    "success": False,
+                    "error": f"No se encontraron proyectos para el cliente '{id_cliente}'",
+                }
+
+            return {
+                "success": True,
+                "id_cliente": id_cliente,
+                "updated_projects": updated_count,
+                "nota": nota,
+            }
+
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    @staticmethod
+    def delete_project(project_id: str, ctx=None) -> dict:
         if not project_id:
             return {"success": False, "error": "project_id requerido"}
 
         try:
-            sh = gc.open_by_key(SPREADSHEET_ID)
+            spreadsheet_id = get_spreadsheet_id_from_context(ctx)
+            sh = gc.open_by_key(spreadsheet_id)
             worksheet = sh.worksheet(SHEET_NAME_PROJECTS)
             all_records = worksheet.get_all_records()
 
