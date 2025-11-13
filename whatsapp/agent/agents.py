@@ -23,11 +23,10 @@ from pydantic import BaseModel
 from whatsapp.agent.tools import ALL_TOOLS
 from whatsapp.config import config
 
+
 # ============================================================
 # MODELO DE CONTEXTO DEL AGENTE
 # ============================================================
-
-
 class AgentContextData(BaseModel):
     sheet_crm_id: str | None = None
 
@@ -38,7 +37,6 @@ USER_CONTEXTS: dict[str, RunContextWrapper[AgentContextData]] = {}
 # ============================================================
 # MEMORIA PERSISTENTE POR USUARIO (SQLite)
 # ============================================================
-
 MEMORY_DIR = "memory"
 os.makedirs(MEMORY_DIR, exist_ok=True)
 SESSIONS: dict[str, AdvancedSQLiteSession] = {}
@@ -59,8 +57,6 @@ async def get_user_session(session_key: str) -> AdvancedSQLiteSession:
 # ============================================================
 # GUARDRAIL DE ENTRADA
 # ============================================================
-
-
 class SafetyCheckOutput(BaseModel):
     is_flagged: bool
     label: str
@@ -98,8 +94,6 @@ async def safety_guardrail(
 # ============================================================
 # SERVICIO PRINCIPAL DEL AGENTE
 # ============================================================
-
-
 async def agent_service(
     user_message: str,
     system_instructions: str,
@@ -120,11 +114,12 @@ async def agent_service(
 
         ctx_wrapper = USER_CONTEXTS[session_key]
 
+        # Actualizar sheet_crm_id en el contexto si existe
         if sheet_crm_id:
             ctx_wrapper.context.sheet_crm_id = sheet_crm_id
             print(f"[DEBUG] sheet_crm_id actualizado en contexto: {sheet_crm_id}")
 
-        # Construir mensaje con info opcional del usuario
+        # Construir prompt con info opcional del usuario
         context_message = ""
         if user_data:
             parts = [f"{k}: {v}" for k, v in user_data.items()]
@@ -171,8 +166,6 @@ async def agent_service(
 # ============================================================
 # UTILIDADES
 # ============================================================
-
-
 def clear_user_session(session_key: str) -> bool:
     if session_key in SESSIONS:
         del SESSIONS[session_key]

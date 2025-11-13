@@ -185,6 +185,7 @@ async def receive_data(request: Request):
         user_data = {}
 
     instructions = await load_instructions_for_user(role_id, client)
+    print(f"Este es el rol : " + instructions)
     session_key = from_number
 
     # ✅ Enviar también sheet_crm_id al agente
