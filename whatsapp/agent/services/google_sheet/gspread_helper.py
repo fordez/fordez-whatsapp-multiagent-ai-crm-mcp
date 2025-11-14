@@ -4,8 +4,6 @@ Evita duplicación de código entre servicios.
 Ahora soporta uso del sheet_crm_id desde contexto.
 """
 
-import os
-
 import gspread
 from agents import RunContextWrapper
 from google.oauth2.service_account import Credentials
@@ -15,43 +13,23 @@ from whatsapp.config import config
 
 def get_gspread_client(service_name: str = "Service") -> gspread.Client:
     """
-    Inicializa un cliente de gspread con credenciales desde archivo o JSON.
-    Determina automáticamente si está en desarrollo o producción.
+    Inicializa un cliente de gspread con credenciales desde JSON cargado en Config.
+    Funciona tanto en desarrollo como en producción.
 
     Args:
         service_name: Nombre del servicio (para logging)
 
     Returns:
         gspread.Client: Cliente autenticado de gspread
-
-    Raises:
-        ValueError: Si las credenciales no son válidas
-        FileNotFoundError: Si el archivo no existe
     """
     try:
-        # Determinar credenciales según ambiente
-        if config.is_prod:
-            # Producción: JSON ya cargado
-            service_account_info = config.service_account_json
-            creds = Credentials.from_service_account_info(
-                service_account_info, scopes=config.scopes
-            )
-        else:
-            # Desarrollo: archivo local
-            service_account_file = config.get_service_account_file_path()
-            if not os.path.isfile(service_account_file):
-                raise FileNotFoundError(
-                    f"No se encontró el archivo de Service Account: {service_account_file}"
-                )
-            creds = Credentials.from_service_account_file(
-                service_account_file, scopes=config.scopes
-            )
-
-        # Inicializar cliente gspread
+        creds = Credentials.from_service_account_info(
+            config.service_account_json,
+            scopes=config.scopes,
+        )
         return gspread.authorize(creds)
-
     except Exception as e:
-        raise
+        raise RuntimeError(f"Error inicializando cliente gspread ({service_name}): {e}")
 
 
 def get_spreadsheet_id_from_context(ctx: RunContextWrapper = None) -> str:

@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 
 import httpx
 import openai
@@ -96,6 +97,44 @@ def transcribe_audio(audio_bytes: bytes):
 
 
 # ==========================================================
+# Normalizar números argentinos
+# ==========================================================
+def normalize_whatsapp_number(phone: str) -> str:
+    """
+    Normaliza números para WhatsApp Cloud API.
+
+    - Argentina (+54):
+        - Elimina el '15' después del código de área.
+        - Agrega un '9' después del código de país si falta.
+        - Resultado: +54 9 [código de área] [número]
+    - Otros países: solo elimina espacios, guiones y paréntesis.
+
+    Args:
+        phone (str): Número de teléfono recibido del webhook.
+
+    Returns:
+        str: Número en formato internacional válido.
+    """
+    if not phone:
+        return phone
+
+    original_phone = phone
+    phone = re.sub(r"[^\d+]", "", phone)
+
+    if phone.startswith("+54"):
+        match = re.match(r"(\+54)(\d{2,4})(15)?(\d+)", phone)
+        if match:
+            plus54, area, _, number = match.groups()
+            phone = f"{plus54}9{area}{number}"
+        else:
+            if not phone.startswith("+549"):
+                phone = phone.replace("+54", "+549", 1)
+
+    logger.info(f"Normalized phone: {original_phone} -> {phone}")
+    return phone
+
+
+# ==========================================================
 # WEBHOOK VERIFY
 # ==========================================================
 @router.get("/webhook")
@@ -126,17 +165,15 @@ async def receive_data(request: Request):
     )
     client = await get_business(phone_id)
 
-    # Solo campos necesarios
     whatsapp_token = safe_get(client, "Access Token")
     phone_number_id = safe_get(client, "Phone Number ID")
-    sheet_crm_id = safe_get(client, "Sheet CRM ID")  # ✅ pasamos al agente
+    sheet_crm_id = safe_get(client, "Sheet CRM ID")
     role_id = safe_get(client, "Role ID")
 
     if not (whatsapp_token and phone_number_id and role_id):
         logger.info(f"Mensaje a {phone_id}: Credenciales incompletas")
         return {"status": "error", "message": "Credenciales incompletas"}
 
-    # Transformar mensaje del webhook
     transformed = dispatch_message(raw_data)
     if not transformed:
         return {"status": "no_message"}
@@ -145,7 +182,9 @@ async def receive_data(request: Request):
     from_number = transformed.get("from")
     reply_to_id = transformed.get("wamid")
 
-    # ✅ Mostrar "escribiendo..." antes de responder
+    # ✅ Normalizar número argentino correctamente
+    from_number = normalize_whatsapp_number(from_number)
+
     if reply_to_id:
         asyncio.create_task(
             send_typing_indicator(
@@ -155,10 +194,8 @@ async def receive_data(request: Request):
             )
         )
 
-    # Obtener nombre del usuario
     user_info = extract_whatsapp_user_info(raw_data)
 
-    # Procesar audio si aplica
     media_id = transformed.get("media_id")
     msg_type = transformed.get("type")
     if msg_type == "audio" and media_id:
@@ -173,7 +210,6 @@ async def receive_data(request: Request):
     if not message:
         return {"status": "no_message"}
 
-    # Datos básicos del usuario (sin lógica CRM)
     user_defaults = {
         "Usuario": user_info.get("usuario", from_number),
         "Canal": "whatsapp",
@@ -185,16 +221,14 @@ async def receive_data(request: Request):
         user_data = {}
 
     instructions = await load_instructions_for_user(role_id, client)
-    print(f"Este es el rol : " + instructions)
     session_key = from_number
 
-    # ✅ Enviar también sheet_crm_id al agente
     reply_dict = await agent_service(
         user_message=message,
         system_instructions=instructions,
         session_key=session_key,
         user_data=user_data,
-        sheet_crm_id=sheet_crm_id,  # ✅ agregado
+        sheet_crm_id=sheet_crm_id,
     )
 
     reply = reply_dict.get("final_output", "No pude generar respuesta.")

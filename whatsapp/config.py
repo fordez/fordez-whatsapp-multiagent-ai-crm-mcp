@@ -5,10 +5,9 @@ import os
 import pytz
 from dotenv import load_dotenv
 
-# Cargar variables del .env
+# Cargar .env solo local
 load_dotenv()
 
-# Configurar logger
 logger = logging.getLogger("whatsapp")
 if not logger.handlers:
     logging.basicConfig(
@@ -18,64 +17,75 @@ if not logger.handlers:
 
 class Config:
     def __init__(self):
+        self.environment = os.getenv("ENVIRONMENT", "development").lower()
+        self.is_prod = self.environment == "production"
+
         # =========================
-        # 🌍 AMBIENTE
+        # 🔐 SECRETOS GOOGLE
         # =========================
-        self.is_prod = os.getenv("ENVIRONMENT", "development") == "production"
-        timezone_str = os.getenv("TIMEZONE", "America/Bogota")
+        if self.is_prod:
+            # En Cloud Run los secretos llegan como JSON dentro de variables
+            self.service_account_json = json.loads(os.getenv("SERVICE_ACCOUNT_FILE"))
+            self.token_json = json.loads(os.getenv("TOKEN_FILE"))
+        else:
+            # Local: leer archivos
+            with open(
+                os.getenv("SERVICE_ACCOUNT_FILE", "secrets/credentials-dev.json")
+            ) as f:
+                self.service_account_json = json.load(f)
+
+            with open(os.getenv("TOKEN_FILE", "secrets/token-dev.json")) as f:
+                self.token_json = json.load(f)
+
+        # =========================
+        # 🌍 TIMEZONE
+        # =========================
+        timezone_str = os.getenv("TIMEZONE", "America/Argentina/Buenos_Aires")
         self.timezone = pytz.timezone(timezone_str)
 
         # =========================
-        # ✅ WEBHOOK WHATSAPP
-        # =========================
-        self.verify_token = os.getenv("VERIFY_TOKEN", "fordez-token")
-
-        # =========================
-        # 🔑 OPENAI
+        # 🤖 OPENAI
         # =========================
         self.openai_api_key = os.getenv("OPENAI_API_KEY")
         self.agent_name = os.getenv("AGENT_NAME", "AG CRM Assistant")
 
         # =========================
-        # 🗄️ GOOGLE SHEETS
+        # 🔑 WHATSAPP
+        # =========================
+        self.verify_token = os.getenv("VERIFY_TOKEN", "fordez-token")
+
+        # =========================
+        # 📄 SHEETS CONFIG
         # =========================
         self.credentials_spreadsheet_id = os.getenv("SPREADSHEET_ID_CREDENTIALS", "")
-        self.credentials_sheet_name = os.getenv("SHEET_NAME_CREDENTIALS", "Credentials")
+        self.credentials_sheet_name = "Credentials"
+        self.sheet_name_lead = "Lead"
+        self.sheet_name_catalog = "Services"
+        self.sheet_name_meetings = "Meetings"
+        self.sheet_name_projects = "Projects"
 
-        # Nombres de hojas estándar
-        self.sheet_name_lead = os.getenv("SHEET_NAME_LEAD", "Lead")
-        self.sheet_name_catalog = os.getenv("SHEET_NAME_CATALOG", "Services")
-        self.sheet_name_meetings = os.getenv("SHEET_NAME_MEETINGS", "Meetings")
-        self.sheet_name_projects = os.getenv("SHEET_NAME_PROJECTS", "Projects")
-
-        # =========================
-        # 🔐 GOOGLE AUTH
-        # =========================
+        # GOOGLE SCOPES
         self.scopes = [
-            os.getenv("SCOPES", "https://www.googleapis.com/auth/spreadsheets")
+            "https://www.googleapis.com/auth/calendar",
+            "https://www.googleapis.com/auth/calendar.events",
+            "https://www.googleapis.com/auth/calendar.readonly",
+            "https://www.googleapis.com/auth/spreadsheets",
         ]
-        self.service_account_file = os.getenv(
-            "SERVICE_ACCOUNT_FILE", "secrets/credentials-dev.json"
+
+        logger.info(
+            "✅ Configuración cargada correctamente (modo %s)", self.environment
         )
-        self.service_account_json = None
 
-        if self.is_prod:
-            env_json = os.getenv("SERVICE_ACCOUNT_JSON")
-            if env_json:
-                self.service_account_json = json.loads(env_json)
-            else:
-                with open(self.service_account_file) as f:
-                    self.service_account_json = json.load(f)
-
-        # Token de usuario (Google)
-        token_file = os.getenv("TOKEN_FILE", "secrets/token-dev.json")
-        with open(token_file) as f:
-            self.token_json = json.load(f)
-
-    # Utilidad para obtener el path del archivo de credenciales (solo en dev)
+    # =====================================================
+    # 🔧 🔥 MÉTODO AÑADIDO SOLO PARA COMPATIBILIDAD
+    # =====================================================
     def get_service_account_file_path(self):
-        return self.service_account_file if not self.is_prod else None
+        """
+        Compatibilidad con módulos antiguos que esperan un archivo.
+        En producción no se usa; en local sí.
+        """
+        return os.getenv("SERVICE_ACCOUNT_FILE", "secrets/credentials-dev.json")
 
 
-# Instancia global de configuración
+# Instancia global
 config = Config()

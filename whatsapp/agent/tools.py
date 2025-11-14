@@ -4,7 +4,7 @@ Scope limitado por seguridad - solo operaciones esenciales.
 Todas las tools pasan el contexto local mediante RunContextWrapper.
 """
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict
 
 import pytz
@@ -34,11 +34,37 @@ from whatsapp.agent.services.google_sheet.meeting_service import MeetingService
 from whatsapp.agent.services.google_sheet.project_service import ProjectService
 from whatsapp.config import config
 
-# ====================================================
-# 🔧 CRM TOOLS
-# ====================================================
+# Zona horaria del sistema
+TZ = config.timezone
 
 
+# =============================
+# 🔧 Helpers
+# =============================
+def _parse_iso_to_tz(dt_str):
+    """
+    Recibe ISO string o datetime, retorna tz-aware datetime en TZ.
+    Admite formatos con 'Z' o sin zona.
+    """
+    from datetime import datetime as _dt
+
+    tz = TZ
+    if isinstance(dt_str, _dt):
+        d = dt_str
+    else:
+        d = _dt.fromisoformat(str(dt_str).replace("Z", "+00:00"))
+
+    # Asegurar que tenga timezone del sistema
+    if d.tzinfo is None:
+        d = tz.localize(d)
+    else:
+        d = d.astimezone(tz)
+    return d
+
+
+# =============================
+# 🧩 TOOLS DE CLIENTES
+# =============================
 @function_tool
 def verify_client(
     wrapper: RunContextWrapper, input: VerifyClientInput
@@ -119,11 +145,9 @@ def update_client_status(
     return {"success": True, "data": result}
 
 
-# ====================================================
-# 📚 CATALOG TOOLS
-# ====================================================
-
-
+# =============================
+# 🧩 TOOLS DE SERVICIOS / CATÁLOGO
+# =============================
 @function_tool
 def get_all_services(wrapper: RunContextWrapper) -> Dict[str, Any]:
     ctx = wrapper.context
@@ -138,11 +162,9 @@ def get_service_by_name(
     return CatalogService.get_service_by_name(input.service_name, ctx=ctx)
 
 
-# ====================================================
-# 📅 CALENDAR TOOLS
-# ====================================================
-
-
+# =============================
+# 🗓️ TOOLS DE CALENDAR Y REUNIONES
+# =============================
 @function_tool
 def calendar_check_availability(wrapper: RunContextWrapper) -> Dict[str, Any]:
     result = CalendarService.check_availability()
@@ -155,20 +177,22 @@ def calendar_check_availability(wrapper: RunContextWrapper) -> Dict[str, Any]:
     return {"success": True, "data": result}
 
 
-# 🆕 Crear nueva reunión
 @function_tool
 def calendar_create_meet(
     wrapper: RunContextWrapper, input: CalendarCreateMeetInput
 ) -> Dict[str, Any]:
     ctx = wrapper.context
-    tz = pytz.timezone(config.timezone)
 
-    start_dt = datetime.fromisoformat(input.start_time)
-    end_dt = datetime.fromisoformat(input.end_time)
-    if start_dt.tzinfo is None:
-        start_dt = tz.localize(start_dt)
-    if end_dt.tzinfo is None:
-        end_dt = tz.localize(end_dt)
+    try:
+        start_dt = _parse_iso_to_tz(input.start_time)
+        end_dt = _parse_iso_to_tz(input.end_time)
+    except Exception as e:
+        return {"success": False, "error": f"Formato de fecha inválido: {e}"}
+
+    now_local = datetime.now(TZ)
+    if start_dt <= now_local:
+        start_dt = now_local + timedelta(minutes=5)
+        end_dt = start_dt + timedelta(hours=1)
 
     try:
         event = CalendarService.create_meet_event(
@@ -184,7 +208,6 @@ def calendar_create_meet(
     if not event.get("success"):
         return {"success": False, "error": event.get("error")}
 
-    # 🧾 Crear fila en Google Sheet
     sheet_result = MeetingService.create_meeting(
         event_id=event["event_id"],
         asunto=event["summary"],
@@ -207,26 +230,25 @@ def calendar_create_meet(
     }
 
 
-# 🔁 Actualizar reunión existente
 @function_tool
 def calendar_update_meet(
     wrapper: RunContextWrapper, input: CalendarUpdateMeetInput
 ) -> Dict[str, Any]:
-    """
-    Actualiza una reunión existente en Calendar y Google Sheet.
-    Si la fecha cambia, libera la anterior y actualiza el mismo registro.
-    """
     ctx = wrapper.context
+
     if not getattr(input, "event_id", None):
         return {"success": False, "error": "event_id es requerido para actualizar"}
 
-    tz = pytz.timezone(config.timezone)
-    start_dt = datetime.fromisoformat(input.start_time)
-    end_dt = datetime.fromisoformat(input.end_time)
-    if start_dt.tzinfo is None:
-        start_dt = tz.localize(start_dt)
-    if end_dt.tzinfo is None:
-        end_dt = tz.localize(end_dt)
+    try:
+        start_dt = _parse_iso_to_tz(input.start_time)
+        end_dt = _parse_iso_to_tz(input.end_time)
+    except Exception as e:
+        return {"success": False, "error": f"Formato de fecha inválido: {e}"}
+
+    now_local = datetime.now(TZ)
+    if start_dt <= now_local:
+        start_dt = now_local + timedelta(minutes=5)
+        end_dt = start_dt + timedelta(hours=1)
 
     try:
         updated_event = CalendarService.update_meet_event(
@@ -246,7 +268,6 @@ def calendar_update_meet(
     if not updated_event.get("success"):
         return {"success": False, "error": updated_event.get("error")}
 
-    # 🔄 Actualiza en Google Sheet (no crea nueva fila)
     sheet_result = MeetingService.update_meeting(
         event_id=input.event_id,
         fields={
@@ -265,7 +286,7 @@ def calendar_update_meet(
         "data": {
             "calendar": updated_event,
             "sheet": sheet_result,
-            "message": "Reunión actualizada correctamente",
+            "message": "Reunión reagendada correctamente",
         },
     }
 
@@ -278,11 +299,9 @@ def calendar_get_event_details(
     return {"success": True, "data": result}
 
 
-# ====================================================
-# 📊 MEETINGS TOOLS
-# ====================================================
-
-
+# =============================
+# 🗂️ TOOLS DE SHEETS (MEETINGS / PROJECTS)
+# =============================
 @function_tool
 def get_meetings_by_client(
     wrapper: RunContextWrapper, input: GetMeetingsByClientInput
@@ -299,11 +318,6 @@ def update_meeting_status(
     return MeetingService.update_meeting(
         event_id=input.meeting_id, fields={"Estado": input.estado}, ctx=ctx
     )
-
-
-# ====================================================
-# 📁 PROJECTS TOOLS
-# ====================================================
 
 
 @function_tool
@@ -324,29 +338,23 @@ def update_project_note_by_client(
     )
 
 
-# ====================================================
-# 📋 LISTA DE TODAS LAS HERRAMIENTAS
-# ====================================================
-
+# =============================
+# 📦 EXPORT
+# =============================
 ALL_TOOLS = [
-    # CRM
     verify_client,
     create_client,
     update_client,
     update_client_note,
     update_client_status,
-    # Catalog
     get_all_services,
     get_service_by_name,
-    # Calendar
     calendar_check_availability,
     calendar_create_meet,
     calendar_update_meet,
     calendar_get_event_details,
-    # Meetings
     get_meetings_by_client,
     update_meeting_status,
-    # Projects
     get_projects_by_client,
     update_project_note_by_client,
 ]

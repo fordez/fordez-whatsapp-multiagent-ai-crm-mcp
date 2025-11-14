@@ -1,5 +1,3 @@
-# whatsapp/agent/services/google_calendar_meet/calendar_service.py
-
 import json
 import os
 from datetime import datetime, time, timedelta
@@ -11,10 +9,11 @@ from googleapiclient.discovery import build
 
 from whatsapp.config import config
 
-# ===============================
-# ⚙️ CONFIGURACIÓN
-# ===============================
+# 🕒 Asegurar timezone válido
 TIMEZONE = config.timezone
+if not isinstance(TIMEZONE, pytz.BaseTzInfo):
+    TIMEZONE = pytz.timezone(str(TIMEZONE))
+
 SCOPES = [
     "https://www.googleapis.com/auth/calendar",
     "https://www.googleapis.com/auth/calendar.events",
@@ -25,16 +24,11 @@ SCOPES = [
 class CalendarService:
     _service = None
 
-    # ====================================================
-    # 🔐 AUTENTICACIÓN
-    # ====================================================
     @staticmethod
     def get_credentials():
-        """Obtiene credenciales OAuth2 desde config y refresca automáticamente si es necesario."""
         creds_data = config.token_json
         creds = Credentials.from_authorized_user_info(creds_data, SCOPES)
 
-        # Refrescar token si ha expirado
         if creds.expired and creds.refresh_token:
             try:
                 creds.refresh(Request())
@@ -52,22 +46,19 @@ class CalendarService:
                             "token_uri": creds.token_uri,
                             "client_id": creds.client_id,
                             "client_secret": creds.client_secret,
-                            "scopes": creds.scopes,
+                            "scopes": list(creds.scopes),
                         },
                         f,
                         indent=2,
                     )
-
-                # Actualizar también en config en memoria
                 config.token_json = {
                     "token": creds.token,
                     "refresh_token": creds.refresh_token,
                     "token_uri": creds.token_uri,
                     "client_id": creds.client_id,
                     "client_secret": creds.client_secret,
-                    "scopes": creds.scopes,
+                    "scopes": list(creds.scopes),
                 }
-
                 print("✅ Token de Google Calendar refrescado y guardado correctamente")
             except Exception as e:
                 print(f"⚠️ Error refrescando token: {e}")
@@ -76,15 +67,25 @@ class CalendarService:
 
     @staticmethod
     def get_service():
-        """Singleton del servicio autenticado."""
         if CalendarService._service is None:
             creds = CalendarService.get_credentials()
             CalendarService._service = build("calendar", "v3", credentials=creds)
         return CalendarService._service
 
-    # ====================================================
-    # 🆕 CREAR EVENTO
-    # ====================================================
+    @staticmethod
+    def _ensure_dt(dt):
+        """Convierte ISO string o datetime a datetime timezone-aware."""
+        tz = TIMEZONE
+        if isinstance(dt, datetime):
+            d = dt
+        else:
+            d = datetime.fromisoformat(str(dt))
+        if d.tzinfo is None:
+            d = tz.localize(d)
+        else:
+            d = d.astimezone(tz)
+        return d
+
     @staticmethod
     def create_meet_event(
         summary, start_time, end_time, attendees=None, description=None
@@ -92,17 +93,17 @@ class CalendarService:
         service = CalendarService.get_service()
         tz = TIMEZONE
 
-        def parse(dt):
-            if isinstance(dt, datetime):
-                return dt if dt.tzinfo else tz.localize(dt)
-            return tz.localize(datetime.fromisoformat(dt))
+        start_time = CalendarService._ensure_dt(start_time)
+        end_time = CalendarService._ensure_dt(end_time)
 
-        # Convertir fechas al timezone definido
-        start_time = parse(start_time)
-        end_time = parse(end_time)
+        now = datetime.now(tz)
 
-        # Verificar disponibilidad antes de crear
-        freebusy_result = (
+        # ✅ permitir 1 minuto de tolerancia para diferencias de reloj
+        if start_time < now - timedelta(minutes=1):
+            return {"success": False, "error": "No se puede crear evento en el pasado"}
+
+        # Verificar disponibilidad
+        fb = (
             service.freebusy()
             .query(
                 body={
@@ -113,7 +114,8 @@ class CalendarService:
             )
             .execute()
         )
-        busy_slots = freebusy_result["calendars"]["primary"].get("busy", [])
+
+        busy_slots = fb["calendars"]["primary"].get("busy", [])
         if busy_slots:
             return {
                 "success": False,
@@ -157,12 +159,9 @@ class CalendarService:
             "attendees": [a.get("email") for a in created_event.get("attendees", [])],
             "calendar_link": created_event.get("htmlLink"),
             "meet_link": meet_link,
-            "estado": "Agendada",
+            "estado": "Programada",
         }
 
-    # ====================================================
-    # 🔁 ACTUALIZAR EVENTO
-    # ====================================================
     @staticmethod
     def update_meet_event(
         event_id,
@@ -172,7 +171,6 @@ class CalendarService:
         attendees=None,
         description=None,
     ):
-        """Actualiza un evento existente en Google Calendar y devuelve la nueva información."""
         service = CalendarService.get_service()
         tz = TIMEZONE
 
@@ -181,64 +179,53 @@ class CalendarService:
                 service.events().get(calendarId="primary", eventId=event_id).execute()
             )
 
-            def parse(dt):
-                if isinstance(dt, datetime):
-                    return dt if dt.tzinfo else tz.localize(dt)
-                return tz.localize(datetime.fromisoformat(dt))
-
-            # Actualizar campos
-            if summary:
+            if summary is not None:
                 event["summary"] = summary
-            if description:
+            if description is not None:
                 event["description"] = description
 
-            start_dt = (
-                parse(start_time)
-                if start_time
-                else datetime.fromisoformat(event["start"]["dateTime"]).astimezone(tz)
-            )
-            end_dt = (
-                parse(end_time)
-                if end_time
-                else datetime.fromisoformat(event["end"]["dateTime"]).astimezone(tz)
-            )
+            start_dt = CalendarService._ensure_dt(start_time) if start_time else None
+            end_dt = CalendarService._ensure_dt(end_time) if end_time else None
 
-            event["start"] = {"dateTime": start_dt.isoformat(), "timeZone": str(tz)}
-            event["end"] = {"dateTime": end_dt.isoformat(), "timeZone": str(tz)}
-
-            if attendees is not None:
+            if start_dt:
+                event["start"] = {"dateTime": start_dt.isoformat(), "timeZone": str(tz)}
+            if end_dt:
+                event["end"] = {"dateTime": end_dt.isoformat(), "timeZone": str(tz)}
+            if attendees:
                 event["attendees"] = [{"email": e} for e in attendees]
 
-            # Verificar disponibilidad (evita doble booking)
-            freebusy_result = (
-                service.freebusy()
-                .query(
-                    body={
-                        "timeMin": start_dt.isoformat(),
-                        "timeMax": end_dt.isoformat(),
-                        "items": [{"id": "primary"}],
-                    }
-                )
-                .execute()
-            )
-            busy_slots = freebusy_result["calendars"]["primary"].get("busy", [])
-            busy_slots = [s for s in busy_slots if s.get("id") != event_id]
-            if busy_slots:
+            now = datetime.now(tz)
+            if start_dt and start_dt < now - timedelta(minutes=1):
                 return {
                     "success": False,
-                    "error": "Horario no disponible para reagendar",
-                    "busy_slots": busy_slots,
+                    "error": "No se puede reagendar a una fecha pasada",
                 }
 
-            # Actualizar evento
+            # Comprobar disponibilidad
+            if start_dt and end_dt:
+                fb = (
+                    service.freebusy()
+                    .query(
+                        body={
+                            "timeMin": start_dt.isoformat(),
+                            "timeMax": end_dt.isoformat(),
+                            "items": [{"id": "primary"}],
+                        }
+                    )
+                    .execute()
+                )
+
+                busy_slots = fb["calendars"]["primary"].get("busy", [])
+                if busy_slots:
+                    return {
+                        "success": False,
+                        "error": "Horario no disponible",
+                        "busy_slots": busy_slots,
+                    }
+
             updated_event = (
                 service.events()
-                .update(
-                    calendarId="primary",
-                    eventId=event_id,
-                    body=event,
-                    conferenceDataVersion=1,
-                )
+                .update(calendarId="primary", eventId=event_id, body=event)
                 .execute()
             )
 
@@ -248,122 +235,20 @@ class CalendarService:
                 .get("uri")
             )
 
-            # Fechas finales convertidas al timezone local
-            start_final = datetime.fromisoformat(
-                updated_event["start"]["dateTime"]
-            ).astimezone(tz)
-            end_final = datetime.fromisoformat(
-                updated_event["end"]["dateTime"]
-            ).astimezone(tz)
-
             return {
                 "success": True,
                 "event_id": updated_event["id"],
                 "summary": updated_event.get("summary"),
                 "description": updated_event.get("description"),
-                "start_time": start_final.isoformat(),
-                "end_time": end_final.isoformat(),
+                "start_time": updated_event["start"]["dateTime"],
+                "end_time": updated_event["end"]["dateTime"],
                 "attendees": [
                     a.get("email") for a in updated_event.get("attendees", [])
                 ],
                 "calendar_link": updated_event.get("htmlLink"),
                 "meet_link": meet_link,
-                "estado": "Reagendada",  # ✅ Aquí se fija explícitamente
+                "estado": "Reagendada",
             }
 
-        except Exception as e:
-            return {"success": False, "error": f"Error al actualizar: {e}"}
-
-    # ====================================================
-    # 📅 DISPONIBILIDAD
-    # ====================================================
-    @staticmethod
-    def check_availability(days_ahead=3, start_hour=8, end_hour=17):
-        service = CalendarService.get_service()
-        tz = TIMEZONE
-        now = datetime.now(tz)
-
-        disponibilidad = []
-        offset, dias = 0, 0
-
-        while dias < days_ahead:
-            date = now.date() + timedelta(days=offset)
-            if date.weekday() >= 5:
-                offset += 1
-                continue
-
-            start = tz.localize(datetime.combine(date, time(start_hour)))
-            end = tz.localize(datetime.combine(date, time(end_hour)))
-
-            result = (
-                service.freebusy()
-                .query(
-                    body={
-                        "timeMin": start.isoformat(),
-                        "timeMax": end.isoformat(),
-                        "items": [{"id": "primary"}],
-                    }
-                )
-                .execute()
-            )
-
-            busy = result["calendars"]["primary"].get("busy", [])
-            free_slots = []
-            current = start
-
-            for slot in busy:
-                s = datetime.fromisoformat(slot["start"]).astimezone(tz)
-                e = datetime.fromisoformat(slot["end"]).astimezone(tz)
-                if current < s:
-                    free_slots.append((current, s))
-                current = max(current, e)
-            if current < end:
-                free_slots.append((current, end))
-
-            slots = [
-                {"inicio": s.isoformat(), "fin": e.isoformat()}
-                for s, e in free_slots
-                if (e - s).total_seconds() >= 900
-            ]
-
-            if slots:
-                disponibilidad.append(
-                    {"dia": date.isoformat(), "espacios_libres": slots}
-                )
-                dias += 1
-
-            offset += 1
-
-        return disponibilidad
-
-    # ====================================================
-    # 🔍 DETALLES DE EVENTO
-    # ====================================================
-    @staticmethod
-    def get_event_details(event_id: str):
-        service = CalendarService.get_service()
-        tz = TIMEZONE
-
-        try:
-            event = (
-                service.events().get(calendarId="primary", eventId=event_id).execute()
-            )
-            start = datetime.fromisoformat(event["start"]["dateTime"]).astimezone(tz)
-            end = datetime.fromisoformat(event["end"]["dateTime"]).astimezone(tz)
-            meet_link = (
-                event.get("conferenceData", {}).get("entryPoints", [{}])[0].get("uri")
-            )
-
-            return {
-                "success": True,
-                "event_id": event["id"],
-                "summary": event.get("summary"),
-                "description": event.get("description"),
-                "start": start.isoformat(),
-                "end": end.isoformat(),
-                "attendees": [a.get("email") for a in event.get("attendees", [])],
-                "calendar_link": event.get("htmlLink"),
-                "meet_link": meet_link,
-            }
         except Exception as e:
             return {"success": False, "error": str(e)}
