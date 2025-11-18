@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime
 
 from whatsapp.agent.services.google_sheet.gspread_helper import (
@@ -5,6 +6,9 @@ from whatsapp.agent.services.google_sheet.gspread_helper import (
     get_spreadsheet_id_from_context,
 )
 from whatsapp.config import config
+
+# 🔧 Logger
+logger = logging.getLogger("whatsapp.meeting")
 
 gc = get_gspread_client(service_name="MeetingService")
 SHEET_NAME_MEETINGS = config.sheet_name_meetings
@@ -31,7 +35,10 @@ class MeetingService:
         ctx=None,
     ) -> dict:
         try:
+            logger.info(f"📝 Creando reunión en Sheet: {event_id} - {asunto}")
+
             if not event_id or not asunto or not fecha_inicio or not id_cliente:
+                logger.error("❌ Campos requeridos faltantes")
                 return {
                     "success": False,
                     "error": "Campos requeridos: event_id, asunto, fecha_inicio e id_cliente",
@@ -46,6 +53,9 @@ class MeetingService:
             for idx, row in enumerate(all_records, start=2):
                 nrow = _normalize_row(row)
                 if str(nrow.get("Id")) == str(event_id):
+                    logger.warning(
+                        f"⚠️ Reunión {event_id} ya existe, actualizando en lugar de crear..."
+                    )
                     # Ya existe → actualizar la fila en lugar de crear nueva
                     return MeetingService.update_meeting(
                         event_id,
@@ -55,7 +65,7 @@ class MeetingService:
                             "Fecha Inicio": fecha_inicio,
                             "Meet_Link": meet_link or "",
                             "Calendar_Link": calendar_link or "",
-                            "Estado": "Reagendada",
+                            "Estado": estado,
                         },
                         ctx=ctx,
                     )
@@ -71,12 +81,13 @@ class MeetingService:
                     fecha_inicio_dt = tz.localize(fecha_inicio_dt)
                 else:
                     fecha_inicio_dt = fecha_inicio_dt.astimezone(tz)
-            except Exception:
-                # Intentar otros formatos o fallar
+            except Exception as e:
+                logger.error(f"❌ Formato de fecha inválido: {e}")
                 return {"success": False, "error": "Formato de fecha_inicio inválido"}
 
             # Evitar crear evento en el pasado
             if fecha_inicio_dt <= datetime.now(tz):
+                logger.warning("⚠️ Intento de crear reunión en el pasado")
                 return {
                     "success": False,
                     "error": "No se puede crear reunión en el pasado",
@@ -94,6 +105,8 @@ class MeetingService:
             worksheet.update_cell(next_row, 8, fecha_creada)
             worksheet.update_cell(next_row, 9, id_cliente)
 
+            logger.info(f"✅ Reunión creada en Sheet: fila {next_row}")
+
             return {
                 "success": True,
                 "event_id": event_id,
@@ -107,11 +120,14 @@ class MeetingService:
                 "fecha_creada": fecha_creada,
             }
         except Exception as e:
+            logger.error(f"❌ Error creando reunión en Sheet: {e}")
             return {"success": False, "error": str(e)}
 
     @staticmethod
     def get_meeting_by_id(event_id: str, ctx=None) -> dict:
         try:
+            logger.info(f"🔍 Buscando reunión: {event_id}")
+
             if not event_id:
                 return {"success": False, "error": "event_id requerido"}
 
@@ -123,18 +139,23 @@ class MeetingService:
             for idx, row in enumerate(all_records, start=2):
                 nrow = _normalize_row(row)
                 if str(nrow.get("Id")) == str(event_id):
+                    logger.info(f"✅ Reunión encontrada: {nrow.get('Asunto')}")
                     return {"success": True, "meeting": nrow, "row_index": idx}
 
+            logger.warning(f"⚠️ Reunión no encontrada: {event_id}")
             return {
                 "success": False,
                 "error": f"No se encontró reunión con ID '{event_id}'",
             }
         except Exception as e:
+            logger.error(f"❌ Error buscando reunión: {e}")
             return {"success": False, "error": str(e)}
 
     @staticmethod
     def get_meetings_by_client(id_cliente: str, ctx=None) -> dict:
         try:
+            logger.info(f"🔍 Buscando reuniones del cliente: {id_cliente}")
+
             if not id_cliente:
                 return {"success": False, "error": "id_cliente requerido"}
 
@@ -148,13 +169,18 @@ class MeetingService:
                 nrow = _normalize_row(row)
                 if str(nrow.get("Id Cliente")) == str(id_cliente):
                     meetings.append(nrow)
+
+            logger.info(f"✅ {len(meetings)} reuniones encontradas")
             return {"success": True, "count": len(meetings), "meetings": meetings}
         except Exception as e:
+            logger.error(f"❌ Error buscando reuniones: {e}")
             return {"success": False, "error": str(e)}
 
     @staticmethod
     def get_meetings_by_date(fecha_inicio: str, ctx=None) -> dict:
         try:
+            logger.info(f"🔍 Buscando reuniones en fecha: {fecha_inicio}")
+
             if not fecha_inicio:
                 return {"success": False, "error": "fecha_inicio requerida"}
 
@@ -170,6 +196,7 @@ class MeetingService:
                 if str(nrow.get("Fecha Inicio", ""))[:10] == fecha_busqueda:
                     meetings.append(nrow)
 
+            logger.info(f"✅ {len(meetings)} reuniones encontradas en {fecha_busqueda}")
             return {
                 "success": True,
                 "fecha": fecha_busqueda,
@@ -177,6 +204,7 @@ class MeetingService:
                 "meetings": meetings,
             }
         except Exception as e:
+            logger.error(f"❌ Error buscando reuniones por fecha: {e}")
             return {"success": False, "error": str(e)}
 
     @staticmethod
@@ -187,6 +215,8 @@ class MeetingService:
             return {"success": False, "error": "No se proporcionaron campos"}
 
         try:
+            logger.info(f"🔄 Actualizando reunión: {event_id}")
+
             spreadsheet_id = get_spreadsheet_id_from_context(ctx)
             sh = gc.open_by_key(spreadsheet_id)
             worksheet = sh.worksheet(SHEET_NAME_MEETINGS)
@@ -210,6 +240,8 @@ class MeetingService:
             for idx, row in enumerate(all_records, start=2):
                 nrow = _normalize_row(row)
                 if str(nrow.get("Id")) == str(event_id):
+                    logger.info(f"📝 Actualizando fila {idx}")
+
                     for key, value in fields.items():
                         col = col_map.get(key)
                         if not col:
@@ -224,6 +256,9 @@ class MeetingService:
                                     fecha_dt = fecha_dt.astimezone(tz)
                                 # Evitar asignar fecha en pasado
                                 if fecha_dt <= datetime.now(tz):
+                                    logger.warning(
+                                        "⚠️ Intento de actualizar a fecha pasada"
+                                    )
                                     return {
                                         "success": False,
                                         "error": "No se puede actualizar a una fecha pasada",
@@ -234,18 +269,22 @@ class MeetingService:
                                 pass
 
                         worksheet.update_cell(idx, col, value)
+                        logger.info(f"   ✓ {key}: {value}")
 
+                    logger.info(f"✅ Reunión actualizada correctamente")
                     return {
                         "success": True,
                         "event_id": event_id,
                         "updated_fields": list(fields.keys()),
                     }
 
+            logger.warning(f"⚠️ Reunión no encontrada: {event_id}")
             return {
                 "success": False,
                 "error": f"No se encontró reunión con ID '{event_id}'",
             }
         except Exception as e:
+            logger.error(f"❌ Error actualizando reunión: {e}")
             return {"success": False, "error": str(e)}
 
     @staticmethod
@@ -254,6 +293,8 @@ class MeetingService:
             return {"success": False, "error": "event_id requerido"}
 
         try:
+            logger.info(f"🗑️ Eliminando reunión: {event_id}")
+
             spreadsheet_id = get_spreadsheet_id_from_context(ctx)
             sh = gc.open_by_key(spreadsheet_id)
             worksheet = sh.worksheet(SHEET_NAME_MEETINGS)
@@ -263,14 +304,17 @@ class MeetingService:
                 nrow = _normalize_row(row)
                 if str(nrow.get("Id")) == str(event_id):
                     worksheet.delete_rows(idx)
+                    logger.info(f"✅ Reunión eliminada: fila {idx}")
                     return {
                         "success": True,
                         "message": f"Reunión '{event_id}' eliminada",
                     }
 
+            logger.warning(f"⚠️ Reunión no encontrada: {event_id}")
             return {
                 "success": False,
                 "error": f"No se encontró reunión con ID '{event_id}'",
             }
         except Exception as e:
+            logger.error(f"❌ Error eliminando reunión: {e}")
             return {"success": False, "error": str(e)}

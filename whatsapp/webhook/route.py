@@ -1,4 +1,11 @@
+# ==========================================================
+# whatsapp/webhook/route.py - WEBHOOK WEB CON PHONE_ID EN URL
+# Combinación Opción 2 + 3: Reutiliza la lógica existente
+# CON VALIDACIÓN DE STATUS
+# ==========================================================
+
 import asyncio
+import json
 import logging
 import re
 
@@ -12,6 +19,10 @@ from whatsapp.config import config
 from whatsapp.webhook.request.dispatcher import dispatch_message
 from whatsapp.webhook.response.reply import send_text
 from whatsapp.webhook.response.typing import send_typing_indicator
+from whatsapp.webhook.response.web_reply import (
+    send_web_message,
+    send_web_typing_indicator,
+)
 from whatsapp.webhook.utilis.client_credentials import get_client_credentials
 from whatsapp.webhook.utilis.user_verify import get_or_create_user
 
@@ -26,7 +37,7 @@ router = APIRouter()
 
 
 # ==========================================================
-# Helpers
+# Helpers (mantienen igual)
 # ==========================================================
 async def parse_request_json(request: Request):
     try:
@@ -48,9 +59,19 @@ async def send_whatsapp_message(
     to: str, body: str, reply_to_id: str, token: str, phone_number_id: str
 ):
     try:
+        logger.info(f"🔍 === ENVIANDO MENSAJE ===")
+        logger.info(f"   Destinatario: '{to}' (len={len(to)})")
+        logger.info(f"   Phone Number ID: {phone_number_id}")
+        logger.info(f"   Mensaje: {body[:50]}...")
+        logger.info(f"   Reply to ID: {reply_to_id}")
+
         if not (to and body and token and phone_number_id):
-            logger.info(f"Mensaje a {to}: Entrega fallida (datos incompletos)")
+            logger.error(f"❌ Mensaje a {to}: Entrega fallida (datos incompletos)")
+            logger.error(
+                f"   to={bool(to)}, body={bool(body)}, token={bool(token)}, phone_id={bool(phone_number_id)}"
+            )
             return
+
         await send_text(
             to=to,
             body=body,
@@ -58,9 +79,12 @@ async def send_whatsapp_message(
             token=token,
             phone_number_id=phone_number_id,
         )
-        logger.info(f"Mensaje a {to}: Entrega exitosa")
+        logger.info(f"✅ Mensaje a {to}: Entrega exitosa")
+
     except Exception as e:
-        logger.info(f"Mensaje a {to}: Entrega fallida (Error: {str(e)})")
+        logger.error(f"❌ Mensaje a {to}: Entrega fallida")
+        logger.error(f"   Error: {str(e)}")
+        logger.error(f"   Tipo: {type(e).__name__}")
 
 
 def extract_whatsapp_user_info(raw_data: dict) -> dict:
@@ -96,46 +120,82 @@ def transcribe_audio(audio_bytes: bytes):
     return resp.text
 
 
-# ==========================================================
-# Normalizar números argentinos
-# ==========================================================
-def normalize_whatsapp_number(phone: str) -> str:
+def normalize_whatsapp_number(raw: str) -> str:
     """
-    Normaliza números para WhatsApp Cloud API.
+    Normaliza números argentinos EXACTAMENTE como necesita Meta:
 
-    - Argentina (+54):
-        - Elimina el '15' después del código de área.
-        - Agrega un '9' después del código de país si falta.
-        - Resultado: +54 9 [código de área] [número]
-    - Otros países: solo elimina espacios, guiones y paréntesis.
+    Si llega: 5493412732652
+    Debe devolver: 54341152732652
+
+    - Remueve el 9 después del prefijo 54
+    - Respeta código de área de 3 dígitos (ej: 341)
+    - Inserta 15 ANTES del número local
+    """
+
+    if not raw:
+        return raw
+
+    # Mantener solo números
+    n = "".join(c for c in raw if c.isdigit())
+
+    # Si NO es Argentina → devolver igual
+    if not n.startswith("54"):
+        return n
+
+    # Remover prefijo país
+    resto = n[2:]  # Ej: 93412732652
+
+    # Si el primer dígito es 9 → removerlo (regla Argentina)
+    if resto.startswith("9"):
+        resto = resto[1:]  # → 3412732652
+
+    # Código de área argentino típico: 3 dígitos
+    codigo_area = resto[:3]  # 341
+    numero_local = resto[3:]  # 2732652
+
+    # Insertar 15 ANTES del número local
+    return f"54{codigo_area}15{numero_local}"
+
+
+# ==========================================================
+# ✅ NUEVA FUNCIÓN: VALIDAR STATUS DEL NEGOCIO
+# ==========================================================
+def validate_business_status(client: dict, phone_id: str) -> bool:
+    """
+    Valida que el negocio tenga Status = TRUE
 
     Args:
-        phone (str): Número de teléfono recibido del webhook.
+        client: Diccionario con los datos del negocio
+        phone_id: ID del teléfono para logging
 
     Returns:
-        str: Número en formato internacional válido.
+        True si el status es True, False en caso contrario
     """
-    if not phone:
-        return phone
+    if not client:
+        logger.error(f"❌ Phone ID {phone_id}: Cliente no encontrado")
+        return False
 
-    original_phone = phone
-    phone = re.sub(r"[^\d+]", "", phone)
+    status = safe_get(client, "Status")
+    business_name = safe_get(client, "Business Name", "Desconocido")
 
-    if phone.startswith("+54"):
-        match = re.match(r"(\+54)(\d{2,4})(15)?(\d+)", phone)
-        if match:
-            plus54, area, _, number = match.groups()
-            phone = f"{plus54}9{area}{number}"
-        else:
-            if not phone.startswith("+549"):
-                phone = phone.replace("+54", "+549", 1)
+    # Convertir a booleano si viene como string
+    if isinstance(status, str):
+        status = status.lower() in ("true", "1", "yes", "si", "sí")
 
-    logger.info(f"Normalized phone: {original_phone} -> {phone}")
-    return phone
+    if not status:
+        logger.warning(
+            f"⛔ Negocio '{business_name}' (Phone ID: {phone_id}): Status = FALSE - Agente desactivado"
+        )
+        return False
+
+    logger.info(
+        f"✅ Negocio '{business_name}' (Phone ID: {phone_id}): Status = TRUE - Agente activo"
+    )
+    return True
 
 
 # ==========================================================
-# WEBHOOK VERIFY
+# WEBHOOK VERIFY (WhatsApp)
 # ==========================================================
 @router.get("/webhook")
 async def verify(request: Request):
@@ -150,11 +210,101 @@ async def verify(request: Request):
 
 
 # ==========================================================
+# ✅ NUEVA FUNCIÓN: FILTRAR NOTIFICACIONES DE ESTADO
+# ==========================================================
+def should_process_webhook(raw_data: dict) -> bool:
+    """
+    Determina si el webhook debe procesarse o ignorarse.
+
+    Ignora:
+    - Notificaciones de estado (sent, delivered, read, failed)
+    - Mensajes enviados por el negocio
+    - Webhooks sin mensajes
+
+    Args:
+        raw_data: Payload completo del webhook
+
+    Returns:
+        True si debe procesarse, False si debe ignorarse
+    """
+    try:
+        entry = raw_data.get("entry", [])
+        if not entry:
+            logger.info("⏭️ Webhook ignorado: No hay entry")
+            return False
+
+        changes = entry[0].get("changes", [])
+        if not changes:
+            logger.info("⏭️ Webhook ignorado: No hay changes")
+            return False
+
+        value = changes[0].get("value", {})
+
+        # 1. Verificar si es una notificación de estado
+        statuses = value.get("statuses", [])
+        if statuses:
+            status_info = statuses[0]
+            status_type = status_info.get("status", "unknown")
+            recipient = status_info.get("recipient_id", "unknown")
+            logger.info(
+                f"⏭️ Notificación de estado ignorada: {status_type} para {recipient}"
+            )
+            return False
+
+        # 2. Verificar si hay mensajes
+        messages = value.get("messages", [])
+        if not messages:
+            logger.info("⏭️ Webhook ignorado: No hay messages")
+            return False
+
+        # 3. Verificar que el mensaje sea del usuario (no del negocio)
+        message = messages[0]
+        message_from = message.get("from", "")
+
+        # Si el mensaje tiene el campo "from", es del usuario
+        # Los mensajes del negocio no tienen este campo o tienen estructura diferente
+        if not message_from:
+            logger.info("⏭️ Webhook ignorado: Mensaje sin remitente válido")
+            return False
+
+        # 4. Verificar tipos de mensaje válidos
+        message_type = message.get("type", "")
+        valid_types = [
+            "text",
+            "audio",
+            "image",
+            "video",
+            "document",
+            "button",
+            "interactive",
+        ]
+
+        if message_type not in valid_types:
+            logger.info(
+                f"⏭️ Webhook ignorado: Tipo de mensaje no válido: {message_type}"
+            )
+            return False
+
+        logger.info(
+            f"✅ Webhook válido: Mensaje tipo '{message_type}' de {message_from}"
+        )
+        return True
+
+    except Exception as e:
+        logger.error(f"❌ Error al validar webhook: {e}")
+        return False
+
+
+# ==========================================================
 # WEBHOOK WHATSAPP
 # ==========================================================
 @router.post("/webhook")
 async def receive_data(request: Request):
     raw_data = await parse_request_json(request)
+
+    # ✅ FILTRAR NOTIFICACIONES DE ESTADO PRIMERO
+    if not should_process_webhook(raw_data):
+        return {"status": "ignored", "reason": "notification or invalid message"}
 
     phone_id = (
         raw_data.get("entry", [{}])[0]
@@ -165,13 +315,26 @@ async def receive_data(request: Request):
     )
     client = await get_business(phone_id)
 
+    # ✅ VALIDAR STATUS ANTES DE CONTINUAR
+    if not validate_business_status(client, phone_id):
+        logger.warning(
+            f"⛔ Mensaje ignorado - Negocio desactivado (Phone ID: {phone_id})"
+        )
+        return {
+            "status": "disabled",
+            "message": "El agente está desactivado para este negocio",
+        }
+
     whatsapp_token = safe_get(client, "Access Token")
     phone_number_id = safe_get(client, "Phone Number ID")
     sheet_crm_id = safe_get(client, "Sheet CRM ID")
     role_id = safe_get(client, "Role ID")
 
     if not (whatsapp_token and phone_number_id and role_id):
-        logger.info(f"Mensaje a {phone_id}: Credenciales incompletas")
+        logger.error(f"❌ Mensaje a {phone_id}: Credenciales incompletas")
+        logger.error(
+            f"   token={bool(whatsapp_token)}, phone_id={bool(phone_number_id)}, role={bool(role_id)}"
+        )
         return {"status": "error", "message": "Credenciales incompletas"}
 
     transformed = dispatch_message(raw_data)
@@ -182,8 +345,12 @@ async def receive_data(request: Request):
     from_number = transformed.get("from")
     reply_to_id = transformed.get("wamid")
 
-    # ✅ Normalizar número argentino correctamente
+    logger.info(f"📥 Número original recibido: {from_number}")
+
+    # Normalización
     from_number = normalize_whatsapp_number(from_number)
+
+    logger.info(f"📥 Número normalizado: {from_number}")
 
     if reply_to_id:
         asyncio.create_task(
@@ -204,7 +371,8 @@ async def receive_data(request: Request):
             audio_bytes = download_media(media_url, whatsapp_token)
             transcript = transcribe_audio(audio_bytes)
             message = transcript
-        except Exception:
+        except Exception as e:
+            logger.error(f"❌ Error procesando audio: {e}")
             message = "No pude procesar tu audio."
 
     if not message:
@@ -223,6 +391,8 @@ async def receive_data(request: Request):
     instructions = await load_instructions_for_user(role_id, client)
     session_key = from_number
 
+    logger.info(f"🤖 Procesando mensaje de {from_number}: {message[:50]}...")
+
     reply_dict = await agent_service(
         user_message=message,
         system_instructions=instructions,
@@ -232,6 +402,8 @@ async def receive_data(request: Request):
     )
 
     reply = reply_dict.get("final_output", "No pude generar respuesta.")
+
+    logger.info(f"💬 Respuesta generada para {from_number}: {reply[:50]}...")
 
     await send_whatsapp_message(
         to=from_number,
@@ -244,99 +416,174 @@ async def receive_data(request: Request):
     return {"status": "ok", "user_data": user_data}
 
 
-# ===============================
-# Webhook Web Chat
-# ===============================
-
-
-@router.post("/webhook/web")
-async def receive_web_data(request: Request):
-    """
-    Endpoint para recibir mensajes del chat web.
-
-    Payload esperado:
-    {
-        "message": "Hola, necesito información",  // Texto del mensaje
-        "audio": "base64_hash_audio",             // Hash del audio (opcional)
-        "userName": "Juan Pérez",                 // Nombre del usuario
-        "userPhone": "573001234567"               // Teléfono con código de país
-    }
-    """
+# ==========================================================
+# WEBHOOK WEB - CON PHONE_ID EN LA URL
+# ==========================================================
+@router.post("/webhook/web/{phone_number_id}")
+async def receive_web_data(request: Request, phone_number_id: str):
     try:
-        payload = await parse_request_json(request)
+        raw_body = await request.body()
+        body_str = raw_body.decode("utf-8", errors="ignore")
 
-        logger.info("====== RAW WEB PAYLOAD ======")
-        logger.info(payload)
-        logger.info("==============================")
+        logger.info(
+            f"\n===== 🌐 WEBHOOK-WEB RECIBIDO (Phone ID: {phone_number_id}) ====="
+        )
 
-        # Extraer datos del payload
-        message_text = payload.get("message", "")
-        audio_hash = payload.get("audio")
-        user_name = payload.get("userName", "")
-        user_phone = payload.get("userPhone", "")
+        try:
+            payload = json.loads(body_str)
+        except json.JSONDecodeError as e:
+            logger.error(f"❌ JSON inválido: {e}")
+            raise HTTPException(status_code=400, detail=f"JSON inválido: {str(e)}")
 
-        # Validaciones
-        if not user_phone:
-            raise HTTPException(
-                status_code=400, detail="El campo 'userPhone' es obligatorio"
+        logger.info(json.dumps(payload, indent=2, ensure_ascii=False))
+        logger.info("===== 🌐 FIN WEBHOOK-WEB ============\n")
+
+        user_phone = payload.get("userPhone") or payload.get("session_id")
+        message = payload.get("message") or payload.get("text")
+        user_name = payload.get("user_name") or payload.get("userName", "Usuario Web")
+        webhook_response_url = payload.get("webhook_url") or payload.get("webhookUrl")
+
+        session_id = user_phone
+
+        logger.info(
+            f"📥 Datos: session_id={session_id}, phone_id={phone_number_id}, user={user_name}"
+        )
+
+        if not session_id:
+            logger.error("❌ Falta userPhone o session_id")
+            return {"status": "error", "message": "Falta userPhone o session_id"}
+
+        if not message:
+            logger.error("❌ Falta message")
+            return {"status": "error", "message": "Falta message"}
+
+        logger.info(f"🔍 Buscando negocio con Phone ID: {phone_number_id}")
+        client = await get_business(phone_number_id)
+
+        if not client:
+            logger.error(f"❌ Phone ID {phone_number_id} no encontrado")
+            return {
+                "status": "error",
+                "message": f"Phone ID {phone_number_id} no encontrado",
+            }
+
+        # ✅ VALIDAR STATUS ANTES DE CONTINUAR
+        if not validate_business_status(client, phone_number_id):
+            logger.warning(
+                f"⛔ Mensaje web ignorado - Negocio desactivado (Phone ID: {phone_number_id})"
             )
 
-        if not message_text and not audio_hash:
-            raise HTTPException(
-                status_code=400, detail="Debe enviar 'message' o 'audio'"
+            # Opcionalmente, enviar mensaje al usuario informando que el servicio está desactivado
+            if webhook_response_url:
+                await send_web_message(
+                    session_id=session_id,
+                    message="Lo sentimos, el servicio está temporalmente desactivado. Por favor, intenta más tarde.",
+                    webhook_url=webhook_response_url,
+                    metadata={"status": "disabled"},
+                )
+
+            return {
+                "status": "disabled",
+                "message": "El agente está desactivado para este negocio",
+                "phone_number_id": phone_number_id,
+            }
+
+        sheet_crm_id = safe_get(client, "Sheet CRM ID")
+        role_id = safe_get(client, "Role ID")
+        business_name = safe_get(client, "Business Name", "Negocio Web")
+
+        logger.info(f"✅ Negocio encontrado: {business_name}")
+        logger.info(f"   - Sheet CRM ID: {sheet_crm_id}")
+        logger.info(f"   - Role ID: {role_id}")
+
+        if not role_id:
+            logger.error(f"❌ Negocio {business_name}: Falta role_id")
+            return {
+                "status": "error",
+                "message": "Configuración incompleta: falta role_id",
+            }
+
+        if webhook_response_url:
+            logger.info(f"⌨️ Enviando typing indicator a: {webhook_response_url}")
+            asyncio.create_task(
+                send_web_typing_indicator(
+                    session_id=session_id, webhook_url=webhook_response_url
+                )
             )
 
-        logger.info(f"🌐 Mensaje web recibido de {user_name} ({user_phone})")
+        user_defaults = {
+            "Nombre": user_name,
+            "Usuario": user_name,
+            "Canal": "web",
+            "Negocio": business_name,
+        }
 
-        # Obtener configuración del negocio (usa None para web, toma defaults de .env)
-        client = await get_business(None)
-
-        role_qualifier_id = client.get("Role Qualifier ID") if client else None
-        sheet_crm_id = client.get("Sheet CRM ID") if client else None
-
-        # Determinar el tipo de mensaje
-        if message_text:
-            message_type = "text"
-            message_content = message_text
-            logger.info(f"📝 Mensaje de texto web: {message_text}")
+        logger.info(
+            f"👤 Obteniendo/creando usuario: {session_id} (Nombre: {user_name})"
+        )
+        user_data = await get_or_create_user(
+            session_id, sheet_crm_id, defaults=user_defaults
+        )
+        if not user_data:
+            user_data = {}
+            logger.warning(f"⚠️ Usuario {session_id}: No se pudo crear/obtener datos")
         else:
-            message_type = "audio"
-            message_content = audio_hash
-            logger.info(f"🎤 Audio web recibido (hash): {audio_hash[:50]}...")
-
-        # Preparar defaults para usuario web
-        user_defaults = {"Usuario": user_phone, "Canal": "web"}
-
-        # Cargar o crear usuario
-        user_task = get_or_create_user(user_phone, sheet_crm_id, defaults=user_defaults)
-        instructions_task = load_instructions(role_qualifier_id)
-        user_data, instructions = await asyncio.gather(user_task, instructions_task)
-
-        # Procesar según el tipo de mensaje
-        if message_type == "text":
-            # Procesar mensaje de texto con el agente
-            reply = await run_agent(
-                message_text, role_qualifier_id=role_qualifier_id, user_data=user_data
-            )
-        else:
-            # Si es audio, indicar que se procesará
-            # Aquí puedes agregar lógica para procesar el audio
-            # Por ejemplo: await process_audio(audio_hash, user_phone, sheet_crm_id)
-            reply = "Hemos recibido tu mensaje de audio y lo estamos procesando. Te responderemos pronto."
             logger.info(
-                f"🎤 Audio recibido de {user_phone}, pendiente de transcripción"
+                f"✅ Usuario obtenido/creado: {user_data.get('Usuario', 'Sin nombre')}"
             )
+
+        logger.info(f"📋 Cargando instrucciones para role_id: {role_id}")
+        instructions = await load_instructions_for_user(role_id, client)
+
+        logger.info(f"🤖 Procesando mensaje con agent_service...")
+        reply_dict = await agent_service(
+            user_message=message,
+            system_instructions=instructions,
+            session_key=session_id,
+            user_data=user_data,
+            sheet_crm_id=sheet_crm_id,
+        )
+
+        reply = reply_dict.get("final_output", "No pude generar respuesta.")
+        logger.info(f"💬 Respuesta generada: {reply[:100]}...")
+
+        success = False
+        if webhook_response_url:
+            logger.info(f"📤 Enviando respuesta a: {webhook_response_url}")
+            success = await send_web_message(
+                session_id=session_id,
+                message=reply,
+                webhook_url=webhook_response_url,
+                metadata={
+                    "timestamp": payload.get("timestamp"),
+                    "user_name": user_name,
+                    "business_name": business_name,
+                    "phone_number_id": phone_number_id,
+                },
+            )
+
+            if success:
+                logger.info(
+                    f"✅ Respuesta web enviada exitosamente a sesión: {session_id}"
+                )
+            else:
+                logger.error(f"❌ Error enviando respuesta web a: {session_id}")
+        else:
+            logger.info(f"📋 Respuesta generada (sin webhook): {reply[:100]}...")
+            success = True
 
         return {
             "status": "ok",
-            "reply": reply,
+            "session_id": session_id,
+            "phone_number_id": phone_number_id,
+            "business_name": business_name,
             "user_data": user_data,
-            "message_type": message_type,
-            "audio_pending": message_type == "audio",
+            "message_sent": success,
+            "reply": reply,
         }
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"❌ Error procesando mensaje web: {e}")
+        logger.error(f"❌ Error procesando mensaje web: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
