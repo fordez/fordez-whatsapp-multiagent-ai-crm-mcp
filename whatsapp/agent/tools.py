@@ -18,13 +18,11 @@ from whatsapp.agent.models import (
     CalendarUpdateMeetInput,
     CreateClientInput,
     GetMeetingsByClientInput,
-    GetProjectsByClientInput,
     GetServiceByNameInput,
     UpdateClientInput,
     UpdateClientNoteInput,
     UpdateClientStatusInput,
     UpdateMeetingStatusInput,
-    UpdateProjectNoteByClientInput,
     VerifyClientInput,
 )
 from whatsapp.agent.services.google_calendar_meet.calendar_service import (
@@ -33,7 +31,6 @@ from whatsapp.agent.services.google_calendar_meet.calendar_service import (
 from whatsapp.agent.services.google_sheet.catalog_service import CatalogService
 from whatsapp.agent.services.google_sheet.crm_service import CRMService
 from whatsapp.agent.services.google_sheet.meeting_service import MeetingService
-from whatsapp.agent.services.google_sheet.project_service import ProjectService
 from whatsapp.config import config
 
 # 🔧 Logger
@@ -276,7 +273,7 @@ def calendar_get_event_details(
 
 
 # =============================
-# 🗂️ SHEETS
+# 🗂️ SHEETS - REUNIONES
 # =============================
 @function_tool
 def get_meetings_by_client(wrapper: RunContextWrapper, input: GetMeetingsByClientInput):
@@ -289,22 +286,6 @@ def update_meeting_status(wrapper: RunContextWrapper, input: UpdateMeetingStatus
     ctx = wrapper.context
     return MeetingService.update_meeting(
         event_id=input.meeting_id, fields={"Estado": input.estado}, ctx=ctx
-    )
-
-
-@function_tool
-def get_projects_by_client(wrapper: RunContextWrapper, input: GetProjectsByClientInput):
-    ctx = wrapper.context
-    return ProjectService.get_projects_by_client(input.id_cliente, ctx=ctx)
-
-
-@function_tool
-def update_project_note_by_client(
-    wrapper: RunContextWrapper, input: UpdateProjectNoteByClientInput
-):
-    ctx = wrapper.context
-    return ProjectService.update_project_note_by_client(
-        id_cliente=input.id_cliente, nota=input.nota, ctx=ctx
     )
 
 
@@ -325,6 +306,4 @@ ALL_TOOLS = [
     calendar_get_event_details,
     get_meetings_by_client,
     update_meeting_status,
-    get_projects_by_client,
-    update_project_note_by_client,
 ]
